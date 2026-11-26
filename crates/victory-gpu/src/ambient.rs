@@ -28,6 +28,8 @@
 //! - a number: that share of the estimate (1: all of it).
 //! - `constant:<level>`: the constant, as beloooo's fork has it.
 //!
+//! Unset, `KLBF_AMBIENT_EST=1` has all of the estimate (cool_fox's default).
+//!
 //! `VICTORY_AMBIENT_SHADE=<strength>,<radius in metres>` sets the creases.
 //!
 //! The air of a room is lit by the same probes: without rays they hold the
@@ -94,7 +96,18 @@ fn parse(set: &str) -> Set {
 
 fn set() -> Set {
     static SET: OnceLock<Set> = OnceLock::new();
-    *SET.get_or_init(|| parse(&std::env::var("VICTORY_AMBIENT").unwrap_or_default()))
+    *SET.get_or_init(|| match std::env::var("VICTORY_AMBIENT") {
+        Ok(set) => parse(&set),
+        Err(_) if est() => Set::Estimate(1.0),
+        Err(_) => Set::Off,
+    })
+}
+
+/// `KLBF_AMBIENT_EST=1` (off): with `VICTORY_AMBIENT` unset, all of the
+/// estimate, so that shade without rays is not black. DoubleGhosty's default
+/// (DoubleGhosty/cool_fox f4164f86, calibrated at 1 in 64b89673).
+fn est() -> bool {
+    std::env::var_os("KLBF_AMBIENT_EST").is_some_and(|v| v == "1")
 }
 
 /// Whether the stand-in is on: set, and the title's rays find nothing.
