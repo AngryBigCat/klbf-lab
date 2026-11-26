@@ -121,7 +121,7 @@ pub fn run(
     let absent = absent_title_dlls(&imported, &mapped, &wanted);
     if !absent.is_empty() {
         let message = format!(
-            "{} not in {}, and neither the host nor VIctory provides {}: the package is \
+            "{} not in {}, and neither the host nor KLBF Lab provides {}: the package is \
              incomplete; copy every file of the package next to the executable",
             absent.join(", "),
             title_dir.display(),

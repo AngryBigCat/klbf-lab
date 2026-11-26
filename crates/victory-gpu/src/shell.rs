@@ -121,36 +121,11 @@ pub fn display_name() -> Option<&'static str> {
     NAME.get_or_init(|| display_name_in(manifest()?)).as_deref()
 }
 
-/// The window's caption: product, game, frame rate and time per frame
-/// over the last interval (`fps` 0: no frame was presented in it), draws
-/// per frame. The game's field is left out when there is no name.
-pub fn caption(name: &str, fps: f64, draws: f64) -> String {
-    let ms = if fps > 0.0 {
-        format!("{:.1}", 1000.0 / fps)
-    } else {
-        "–".to_owned()
-    };
-    let name = name.trim();
-    let game = if name.is_empty() {
-        String::new()
-    } else {
-        format!(" | {name}")
-    };
-    format!("Scarlett{game} | {fps:.1} FPS | {ms} ms | {draws:.0} draws")
-}
-
-/// The game's name in a window's text: the text itself, but for a
-/// caption of ours (our own window's first text, or the caption a
-/// presenter made before, read again by a new one), whose game field it
-/// is (none: empty).
-pub fn game_in_caption(text: &str) -> &str {
-    let Some(rest) = text.strip_prefix("Scarlett") else {
-        return text;
-    };
-    rest.strip_prefix(" | ")
-        .and_then(|rest| rest.split(" | ").next())
-        .filter(|field| !field.ends_with(" FPS"))
-        .unwrap_or("")
+/// The window's caption (ours, PastiiJay/klbf-lab's form): `KLBF Lab · F FPS · M ms` over the
+/// last interval (`fps` 0: no frame was presented in it, `–` ms). No game name on screen.
+pub fn caption(fps: f64) -> String {
+    let ms = if fps > 0.0 { format!("{:.0}", 1000.0 / fps) } else { "\u{2013}".to_owned() };
+    format!("KLBF Lab  \u{b7}  {fps:.0} FPS  \u{b7}  {ms} ms")
 }
 
 /// Whether frames are shown (`VICTORY_PRESENT_SKIP`, default 0: every frame
@@ -185,18 +160,6 @@ pub fn present_maybe<R>(do_not_wait: u32, present: impl FnOnce(u32) -> R) -> Opt
         1 => None,
         n => (PRESENTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % n == 0).then(|| present(do_not_wait)),
     }
-}
-
-/// The caption text for the window, from what the window said when first
-/// read (`first`, the title's caption): `Scarlett | <game> | F FPS | M ms |
-/// D draws`, the game's name from the manifest, else from `first`. The
-/// form our scripts parse (fields split at `|`).
-pub fn caption_for(first: &[u16], fps: f64, draws: f64) -> String {
-    let name = match display_name() {
-        Some(name) => name.to_owned(),
-        None => game_in_caption(&String::from_utf16_lossy(first)).to_owned(),
-    };
-    caption(&name, fps, draws)
 }
 
 /// The logo files in `dir` for the small and the big icon, of those the
@@ -241,10 +204,48 @@ pub fn set_icons(hwnd: HWND) {
     let _ = std::thread::Builder::new()
         .name("victory-icons".into())
         .spawn(move || {
+            if our_icons(hwnd) {
+                return;
+            }
             if let Err(why) = make_icons(hwnd) {
                 tracing::info!("the window keeps its icon: {why}");
             }
         });
+}
+
+/// (ours) The KLBF Lab icon of the executable (resource 1, `apps/victory/build.rs`) as the
+/// window's small and big icons; false when the executable has none (the game's logos then).
+fn our_icons(hwnd: usize) -> bool {
+    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows::Win32::UI::WindowsAndMessaging::{IMAGE_ICON, LR_DEFAULTCOLOR, LoadImageW};
+    // SAFETY: plain queries; resource 1 of our own executable, loaded at each size.
+    let icons = unsafe {
+        let Ok(exe) = GetModuleHandleW(None) else { return false };
+        [GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CXICON)].map(|size| {
+            LoadImageW(Some(exe.into()), windows::core::PCWSTR(1 as _), IMAGE_ICON, size, size, LR_DEFAULTCOLOR)
+                .map_or(0, |h| h.0 as usize)
+        })
+    };
+    if icons.contains(&0) {
+        for icon in icons.into_iter().filter(|&i| i != 0) {
+            // SAFETY: an icon made above, given to no one.
+            let _ = unsafe { DestroyIcon(HICON(icon as *mut _)) };
+        }
+        return false;
+    }
+    ICONS.lock().unwrap_or_else(|e| e.into_inner()).push((hwnd, icons));
+    for (k, which) in [ICON_SMALL, ICON_BIG].into_iter().enumerate() {
+        // SAFETY: a window handle (a stale one fails) and our icon.
+        let posted = unsafe {
+            PostMessageW(Some(HWND(hwnd as *mut _)), WM_SETICON, WPARAM(which as usize), LPARAM(icons[k] as isize))
+        };
+        if posted.is_err() {
+            window_destroyed(hwnd);
+            return true;
+        }
+    }
+    tracing::info!("the window's icons are KLBF Lab's");
+    true
 }
 
 /// [`set_icons`]' work, on its thread.
@@ -443,29 +444,9 @@ mod tests {
 
     #[test]
     fn the_caption_says_frame_rate_and_time_per_frame() {
-        assert_eq!(
-            caption("Grand Theft Auto VI", 8.9, 4225.4),
-            "Scarlett | Grand Theft Auto VI | 8.9 FPS | 112.4 ms | 4225 draws"
-        );
-        assert_eq!(
-            caption("Americas", 25.0, 10.0),
-            "Scarlett | Americas | 25.0 FPS | 40.0 ms | 10 draws"
-        );
+        assert_eq!(caption(10.7), "KLBF Lab  \u{b7}  11 FPS  \u{b7}  93 ms");
         // No frame presented in the interval.
-        assert_eq!(
-            caption("Americas", 0.0, 0.0),
-            "Scarlett | Americas | 0.0 FPS | – ms | 0 draws"
-        );
-        // No name: the field is left out.
-        assert_eq!(
-            caption("", 30.0, 1.0),
-            "Scarlett | 30.0 FPS | 33.3 ms | 1 draws"
-        );
-        // The name in a window's text, also in a caption of ours.
-        assert_eq!(game_in_caption("Americas"), "Americas");
-        assert_eq!(game_in_caption("Scarlett"), "");
-        assert_eq!(game_in_caption(&caption("Americas", 9.0, 1.0)), "Americas");
-        assert_eq!(game_in_caption(&caption("", 9.0, 1.0)), "");
+        assert_eq!(caption(0.0), "KLBF Lab  \u{b7}  0 FPS  \u{b7}  \u{2013} ms");
     }
 
     #[test]

@@ -9247,8 +9247,6 @@ struct Meter {
     copy_stats_frames: u64,
     drawn: u64,
     logged: std::time::Instant,
-    /// The caption the window had, once read.
-    caption: Option<Vec<u16>>,
 }
 
 /// (C3, from another-victory-fork f36a0fc) `VICTORY_METER_THREAD=1`, default
@@ -9298,7 +9296,6 @@ impl Meter {
             copy_stats_frames: 0,
             drawn: crate::draw::drawn(),
             logged: now,
-            caption: None,
         }
     }
 
@@ -9592,19 +9589,10 @@ impl Meter {
             };
             meter_lines(lines);
         }
-        if self.caption.is_none() {
-            // The window's own text, read without a message.
-            let mut buffer = vec![0u16; 512];
-            // SAFETY: a window handle and a buffer of that length.
-            let n = unsafe { InternalGetWindowText(hwnd, &mut buffer) };
-            buffer.truncate(n.max(0) as usize);
-            self.caption = Some(buffer);
-        }
-        let Some(caption) = &self.caption else { return };
-        // (Fox port A) Our scripts' caption: "Scarlett | <game> | F FPS | M ms
-        // | D draws" (fields split at '|'; run-auto/input-check/run-compare).
-        let _ = ms;
-        let text = crate::shell::caption_for(caption, fps, draws);
+        // (ours) The caption the player sees, as PastiiJay/klbf-lab's: "KLBF Lab · F FPS · M ms"
+        // (was "Scarlett | <game> | F FPS | M ms | D draws", which tools/*.sh split at '|').
+        let _ = (ms, draws);
+        let text = crate::shell::caption(fps);
         let mut text: Vec<u16> = text.encode_utf16().collect();
         text.push(0);
         // Setting the text waits for the window's thread (a title thread,
@@ -10480,6 +10468,8 @@ fn make_window(width: u32, height: u32) -> windows::core::Result<HWND> {
             lpfnWndProc: Some(window_proc),
             hInstance: instance.into(),
             lpszClassName: CLASS,
+            // (ours) The executable's KLBF Lab icon (resource 1, apps/victory/build.rs), if any.
+            hIcon: LoadIconW(Some(instance.into()), PCWSTR(1 as _)).unwrap_or_default(),
             hCursor: LoadCursorW(None, IDC_ARROW)?,
             ..Default::default()
         };

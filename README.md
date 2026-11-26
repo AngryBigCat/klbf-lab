@@ -242,6 +242,9 @@ In short; the reasons and the measurements are in [docs/findings.md](docs/findin
 
 ## Credits
 
+CREDITS: KLBF Lab build (PastiiJay/klbf-lab). Based on Op-lite/victory-scarlett (itself on codec-d/cool_fox).
+Start it with `play.ps1` (KLBF Lab's cache and saves in `%LOCALAPPDATA%\klbf-lab`); `scripts/play-scarlett.ps1` is unchanged.
+
 This is a tree of other people's work with more on top. The history is kept, and
 commits taken from elsewhere name the commit and its author.
 
