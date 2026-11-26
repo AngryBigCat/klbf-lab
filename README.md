@@ -19,6 +19,8 @@ This is the one version we recommend. It is meant for every graphics card; so fa
 
 ## New test build: Lab 63 on [`beta-2`](https://github.com/PastiiJay/klbf-lab/tree/beta-2) (26 Nov 2026)
 
+> **New AMD beta (Series X, sea fixed):** branch [`beta-amd`](https://github.com/PastiiJay/klbf-lab/tree/beta-amd), BM-v1 16.3 fps avg on RX 9070 XT — based on [Op-lite/victory-scarlett](https://github.com/Op-lite/victory-scarlett).
+>
 > **🧪🌴 New: KLBF Lab Bench · Bayside Morning v1.** A 5-minute hands-off test from the same spot for everyone, input locked, with a certified postcard at the end. [How to run it](docs/klbf/BENCH-BM-V1.md) · [Results by hardware](docs/klbf/BAYSIDE-MORNING-V1.md). Lab 63 also fixes dark faces in shade and skips the intro movie on request.
 >
 > <!-- latest-run-start -->
