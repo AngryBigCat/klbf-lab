@@ -1228,7 +1228,9 @@ fn thread(game: HWND, adapter: Option<IDXGIAdapter3>) {
                 let started = START.get().map(Instant::elapsed);
                 // Set every second (a caption thread of the host may have put its own back).
                 if holds_title() && IsWindow(game) != 0 {
-                    set_title(game, &mut title_buf, &title_text(started));
+                    // "· compiling N shaders" after it while pipelines are being made (none at 0).
+                    let text = crate::shell::compiling(title_text(started), " \u{b7} ", crate::pipeline::making());
+                    set_title(game, &mut title_buf, &text);
                 }
                 // Placed from the game window's own rectangle, read every time (it may sit on
                 // any screen, and move): its top-left, below the frame when the client starts

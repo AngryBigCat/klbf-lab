@@ -9592,7 +9592,8 @@ impl Meter {
         // (ours) The caption the player sees, as PastiiJay/klbf-lab's: "KLBF Lab · F FPS · M ms"
         // (was "Scarlett | <game> | F FPS | M ms | D draws", which tools/*.sh split at '|').
         let _ = (ms, draws);
-        let text = crate::shell::caption(fps);
+        // While pipelines are being made: "· compiling N shaders" (the frame line's counter).
+        let text = crate::shell::compiling(crate::shell::caption(fps), "  \u{b7}  ", crate::pipeline::making());
         let mut text: Vec<u16> = text.encode_utf16().collect();
         text.push(0);
         // Setting the text waits for the window's thread (a title thread,

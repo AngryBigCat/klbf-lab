@@ -128,6 +128,17 @@ pub fn caption(fps: f64) -> String {
     format!("KLBF Lab  \u{b7}  {fps:.0} FPS  \u{b7}  {ms} ms")
 }
 
+/// `caption` with `sep` and "compiling N shaders" after it while `making` host pipelines are
+/// queued and not made yet (the frame line's "(N being made)"); unchanged at 0. No percentage:
+/// the queue grows as the title asks, so there is no total to measure against.
+pub fn compiling(caption: String, sep: &str, making: u64) -> String {
+    match making {
+        0 => caption,
+        1 => format!("{caption}{sep}compiling 1 shader"),
+        n => format!("{caption}{sep}compiling {n} shaders"),
+    }
+}
+
 /// Whether frames are shown (`VICTORY_PRESENT_SKIP`, default 0: every frame
 /// presented as before). 1: the frame is copied to the swap chain's back
 /// buffer as always but `Present` is never called (with the displays off
@@ -480,6 +491,20 @@ mod tests {
         assert_eq!(caption(10.7), "KLBF Lab  \u{b7}  11 FPS  \u{b7}  93 ms");
         // No frame presented in the interval.
         assert_eq!(caption(0.0), "KLBF Lab  \u{b7}  0 FPS  \u{b7}  \u{2013} ms");
+    }
+
+    #[test]
+    fn the_caption_counts_shaders_being_made() {
+        let sep = "  \u{b7}  ";
+        assert_eq!(compiling(caption(15.0), sep, 0), caption(15.0));
+        assert_eq!(
+            compiling(caption(15.0), sep, 1558),
+            "KLBF Lab  \u{b7}  15 FPS  \u{b7}  67 ms  \u{b7}  compiling 1558 shaders"
+        );
+        assert_eq!(
+            compiling("KLBF Lab \u{b7} Bench 2:13 / 5:00".into(), " \u{b7} ", 1),
+            "KLBF Lab \u{b7} Bench 2:13 / 5:00 \u{b7} compiling 1 shader"
+        );
     }
 
     #[test]
