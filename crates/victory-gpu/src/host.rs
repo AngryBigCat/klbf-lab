@@ -9934,6 +9934,7 @@ impl Host {
         // (Fox port A) The game's logos as the window's icons, on a thread of
         // their own (nothing waits for them; a failure leaves the window's own).
         crate::shell::set_icons(hwnd);
+        crate::shell::set_colors(hwnd); // (ours) KLBF Lab frame colours
         self.log_video_memory("right before the swap chain is made");
         // SAFETY: plain object creation for our window.
         unsafe {
@@ -10495,6 +10496,7 @@ fn make_window(width: u32, height: u32) -> windows::core::Result<HWND> {
             Some(instance.into()),
             None,
         )
+        .inspect(|&hwnd| crate::shell::set_colors(hwnd))
     }
 }
 

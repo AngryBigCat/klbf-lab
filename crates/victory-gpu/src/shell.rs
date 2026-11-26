@@ -213,6 +213,34 @@ pub fn set_icons(hwnd: HWND) {
         });
 }
 
+/// (ours) KLBF Lab's colours on the window's frame (Windows 11 DWM): violet border, near-black
+/// caption, white caption text. Windows 10 has no such attributes and refuses, silently.
+/// On a thread of its own, as the icons: the window's thread is the title's. `KLBF_WINDOW_COLORS=0`:
+/// Windows' own colours.
+pub fn set_colors(hwnd: HWND) {
+    use windows_sys::Win32::Graphics::Dwm::{
+        DWMWA_BORDER_COLOR, DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR, DwmSetWindowAttribute,
+    };
+    if std::env::var_os("KLBF_WINDOW_COLORS").is_some_and(|v| v == "0") {
+        return;
+    }
+    let hwnd = hwnd.0 as usize;
+    let _ = std::thread::Builder::new().name("victory-colors".into()).spawn(move || {
+        for (attribute, rgb) in
+            [(DWMWA_BORDER_COLOR, 0x7C3AED), (DWMWA_CAPTION_COLOR, 0x15101F), (DWMWA_TEXT_COLOR, 0xFFFFFF)]
+        {
+            let color = colorref(rgb);
+            // SAFETY: a window handle (a stale one fails) and a 4-byte COLORREF.
+            let _ = unsafe { DwmSetWindowAttribute(hwnd as _, attribute as u32, (&raw const color).cast(), 4) };
+        }
+    });
+}
+
+/// 0xRRGGBB as a COLORREF (0x00BBGGRR).
+fn colorref(rgb: u32) -> u32 {
+    (rgb & 0xFF) << 16 | (rgb & 0xFF00) | (rgb >> 16 & 0xFF)
+}
+
 /// (ours) The KLBF Lab icon of the executable (resource 1, `apps/victory/build.rs`) as the
 /// window's small and big icons; false when the executable has none (the game's logos then).
 fn our_icons(hwnd: usize) -> bool {
@@ -441,6 +469,11 @@ fn icon_from_bgra(width: i32, height: i32, pixels: &[u8]) -> windows::core::Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn colours_are_colorrefs() {
+        assert_eq!(colorref(0x7C3AED), 0xED3A7C);
+    }
 
     #[test]
     fn the_caption_says_frame_rate_and_time_per_frame() {
