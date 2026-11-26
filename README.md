@@ -19,18 +19,37 @@ work of a local fork ("Scarlett") ported onto it. Target PC: Ryzen 7 9800X3D, 32
 
 A heavier hand-played scene (5,500-8,600 draws) runs at about 70 ms. Memory commit is about 36.5 GB.
 
-## Best settings so far
+## Run it as in run-118
 
-cool_fox's launcher set without `VICTORY_THIN` and without the stand-in ambient light, plus three switches:
+Settings are environment variables read at start. In PowerShell, from the repository folder, after the build below:
 
-```
+```powershell
+$env:VICTORY_GAME_DIR  = 'D:\Games\MyDump'          # your own dump: the folder with game_scarlett_master.exe
+$env:VICTORY_CACHE_DIR = 'D:\VIctory\cache'         # shader and pipeline caches (a first run fills them and is slow)
+$env:VICTORY_DATA_DIR  = 'D:\VIctory\data'          # saves
+$set = @'
+VICTORY_JOIN_COPIES=1 VICTORY_REFRESH_ONCE=1 VICTORY_CARD_REHASH_RUNS=1 VICTORY_BACK_OWN_VIEW=1 VICTORY_WIDE_MERGE=1
+VICTORY_LEVELS_ON_DEMAND=1 VICTORY_MIRROR_FAST=1 VICTORY_FRAME_LOG=1 VICTORY_CARD_METER=1 VICTORY_PIPELINE_WAIT_MS=20
+VICTORY_ASYNC_SUBMIT=1 VICTORY_QUEUE2=1 VICTORY_INDIRECT_WINDOW=1 VICTORY_TEXTURE_NO_WAIT=1 VICTORY_COPY_PLAIN=1
+VICTORY_WIDE_TEXTURES=1 VICTORY_INDIRECT_GATHER=1 VICTORY_LATE_WAIT_LISTS=1024 VICTORY_CARD_FILLS_BATCH=0
+VICTORY_GATHER_DISPATCH=0
 VICTORY_RELAY=2 VICTORY_WIDE_BACK=1 VICTORY_RELAY_COPY=1 VICTORY_CARD_STEPS=2 VICTORY_INDIRECT_BATCH=2
 VICTORY_MAP_THREADS=1 VICTORY_CARD_AWAKE=1 VICTORY_SHOW_AFTER=1 VICTORY_JOIN_PARTS=8 VICTORY_UPLOAD_AHEAD=1
 VICTORY_CARD_BUFFERS_MIN_KB=64
 VICTORY_POOL_DISCARD=1 VICTORY_FILL_TITLE=1 VICTORY_PARTIAL_DELTA=1
+'@
+$set -split '\s+' | Where-Object { $_ } | ForEach-Object { $k, $v = $_ -split '=', 2; Set-Item "Env:$k" $v }
+.\target\diag\victory.exe run "$env:VICTORY_GAME_DIR\game_scarlett_master.exe" --execute
 ```
 
-Build: `cargo build --profile diag -p victory --features diagnostics --locked`.
+That is the exact set run-118 was started with: the first block is this fork's standing run set (some of its names
+are from the older tree and are ignored here), the second is cool_fox's launcher set without `VICTORY_THIN` and the
+stand-in ambient light, the third is the three switches that made the difference. Do **not** use `Play-VIctory.cmd`
+for this: it selects Series S and other settings. The start screens need pad or keyboard input (Enter = A, arrows =
+D-pad); for a hands-off run add `VICTORY_AUTO_INPUT` as in `tools/run-auto.sh`.
+
+Build: `cargo build --profile diag -p victory --features diagnostics --locked` (the pinned toolchain in
+`rust-toolchain.toml`, MSVC build tools and a Windows SDK).
 
 ## What was added to cool_fox
 
@@ -53,9 +72,10 @@ Switches, off by default (the base's behaviour is kept unless a run showed a gai
   upload are sent again. In the best set.
 - `VICTORY_FILL_TITLE=1` — cool_fox's own switch; removes 15-24 ms a frame of waits to read title memory behind
   flights. In the best set.
+- `VICTORY_REFRESH_ONCE=1` (+`=verify`) — part of the standing run set, so it was on in every measured run,
+  the floor included.
 - `VICTORY_MAP_DEFER`, `VICTORY_REMAP_SAME`, `VICTORY_DSTORAGE_OLDEST_FIRST`, `VICTORY_DSTORAGE_WORKERS`,
-  `VICTORY_AFFINITY=free`, `VICTORY_HEAP_PACK`, `VICTORY_STAGING_SPARE_BLOCKS`, `VICTORY_REFRESH_ONCE` (+`=verify`),
-  `VICTORY_CHUNK_FINAL`, `VICTORY_CHUNK_COUNT`, `VICTORY_BIND_FILTER`, `VICTORY_PREPARE_WIDE`,
+  `VICTORY_AFFINITY=free`, `VICTORY_HEAP_PACK`, `VICTORY_STAGING_SPARE_BLOCKS`, `VICTORY_CHUNK_FINAL`, `VICTORY_CHUNK_COUNT`, `VICTORY_BIND_FILTER`, `VICTORY_PREPARE_WIDE`,
   `VICTORY_WAVE_PAIRS_FIRST`, `VICTORY_ONE_MODE_PER_REGISTER`, `VICTORY_HOIST_LOADS`: ported or new; no gain shown
   yet, or untested. Tried and rejected on this base: `VICTORY_UNMAP_EXACT`, `VICTORY_TEXTURE_RAM_CAPS=0`,
   `VICTORY_VRAM_RAW_PCT`.
@@ -67,8 +87,9 @@ Switches, off by default (the base's behaviour is kept unless a run showed a gai
   pool blocks hold about 3 GB of holes.
 - About 80 s of a 6-minute run is spent in frames over 150 ms: mostly the game's page-mapping calls under low free
   RAM, and bursts of texture uploads.
-- About 820 draws a frame are dropped for two pipeline creation methods that are not implemented; ray-tracing
-  acceleration structures are not built.
+- Some draws are dropped each frame for lack of a host pipeline (44-164 on the opening route, about 500 in heavy
+  scenes; cause not yet found). Two pipeline creation methods are not implemented (the title falls back to ordinary
+  containers). Ray-tracing acceleration structures are not built.
 
 ## Where things are
 
