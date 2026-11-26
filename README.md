@@ -1,3 +1,36 @@
+# KLBF Lab — AMD beta (branch `beta-amd`)
+
+**Beta.** Based on [Op-lite/victory-scarlett](https://github.com/Op-lite/victory-scarlett) (itself on
+codec-d/cool_fox), plus our changes:
+
+- AMD shader-compiler crash fix (fxceless #1213)
+- foliage fix (Ryuki)
+- optional ambient estimate (cool_fox), off by default
+- write-combining skip
+- descriptor slot fix (fxceless #1324)
+- bench BM-v1
+- window branding
+
+**How to run** (your own dump of the title is needed; nothing of the title is in this repository):
+
+```powershell
+.\play.ps1 -Game 'D:\Path\To\YourDump'
+```
+
+- optional: `-SkipMovies end` skips the opening movies
+- optional: `$env:KLBF_AMBIENT_EST='1'` before starting, for brighter shade
+- Series X profile by default
+
+**Known issues:** green boats and vehicles, semi-transparent foliage in places, distance-dependent shadow
+flicker, late pop-in.
+
+**Measured** (BM-v1, self-measured, RX 9070 XT + Ryzen 7 9800X3D, Series X profile): 16.3 fps average,
+1 % low 6.2 fps, 4 freezes > 200 ms, 93.9 % of the time at 12 fps or more.
+
+All upstream credits and the licence below are kept unchanged.
+
+---
+
 # Scarlett fork (branch `scarlett-fox`), state of 2026-11-26
 
 ## How to start the game (the short version)
