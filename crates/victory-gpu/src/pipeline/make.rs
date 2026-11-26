@@ -89,16 +89,31 @@ fn family(shaders: &[Arc<Shader>]) -> Option<usize> {
     FAMILIES.iter().position(|name| named(shaders, name.as_bytes()))
 }
 
+/// `KLBF_FOLIAGE_FIX` (on; `=0`: the old rule). The screen probes' light goes
+/// through `CS_RaytracingResolve` and `CS_ScreenProbes_ActivateRays`: left out
+/// without the builder, the probes keep what their memory held, and shaded
+/// foliage, blinds and curtains read magenta, shade black. Both are then made
+/// unless `VICTORY_RT_RESOLVE=0` / `VICTORY_ACTIVATE_RAYS=0`. ryuki's find
+/// (YukiRyuu/RYUKI-7900XT 362f600b: purple pixels 15-69 per mille to 0-1).
+fn foliage_fix() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("KLBF_FOLIAGE_FIX").is_none_or(|v| v != "0"))
+}
+
 fn left_out(family: Option<usize>) -> Option<&'static str> {
     static SKIP_RT_RESOLVE: OnceLock<bool> = OnceLock::new();
     let skip_rt = *SKIP_RT_RESOLVE.get_or_init(|| {
         let builder = std::env::var_os("VICTORY_BVH_BUILDER").is_some_and(|v| v == "1");
         // Without BVH, ~1,000 CS_RaytracingResolve shaders shade no hits while
         // clogging the cold compiler queue; skip unless VICTORY_RT_RESOLVE=1.
-        let skip = !builder && std::env::var_os("VICTORY_RT_RESOLVE").is_none_or(|v| v == "0");
+        // With `KLBF_FOLIAGE_FIX` (on): made unless VICTORY_RT_RESOLVE=0.
+        let rt_resolve = std::env::var_os("VICTORY_RT_RESOLVE");
+        let off = rt_resolve.as_ref().is_some_and(|v| v == "0");
+        let skip = !builder && (off || rt_resolve.is_none() && !foliage_fix());
         tracing::info!(
             left_out = skip,
             builder,
+            foliage_fix = foliage_fix(),
             "programs left out by name: CS_RaytracingResolve (shades the hits of the title's rays, one per material) \
              is left out while the ray-tracing structure builder is off (VICTORY_BVH_BUILDER=1 or VICTORY_RT_RESOLVE=1: made); \
              its dispatches count as 'left out by name', not 'being made'"
@@ -111,7 +126,7 @@ fn left_out(family: Option<usize>) -> Option<&'static str> {
     static SKIP_ACTIVATE_RAYS: OnceLock<bool> = OnceLock::new();
     let skip_activate = *SKIP_ACTIVATE_RAYS.get_or_init(|| {
         let builder = std::env::var_os("VICTORY_BVH_BUILDER").is_some_and(|v| v == "1");
-        if builder {
+        if builder || foliage_fix() {
             return std::env::var_os("VICTORY_ACTIVATE_RAYS").is_some_and(|v| v == "0");
         }
         std::env::var_os("VICTORY_ACTIVATE_RAYS").is_none_or(|v| v == "0")
