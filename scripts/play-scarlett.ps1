@@ -11,9 +11,9 @@
 # -Data        saves (default: %LOCALAPPDATA%\victory-scarlett\data)
 # -RayTracing  the title's own ray tracing (VICTORY_BVH_BUILDER=1): better light, much slower. Off by default.
 # -AutoStart   presses through the start screens by itself, for a fresh start with no save
-# -ProbeRays   removes the violet glow on bushes, trees and palms that the base shows with ray tracing off
-#              (the title's light probes are activated and their rays resolved as misses; no ray-tracing
-#              structure is built). Costs frame time; the first start with it builds about 1,000 pipelines.
+# -NoProbeRays the base's picture with ray tracing off: bushes, trees and palms glow violet. By default the
+#              title's light probes are activated and every ray misses, as with an empty ray-tracing
+#              structure (no cost measured); the first start after a change of this re-translates shaders.
 # -Hooks       with the memory hooks: faster, but they can show a few small textures with old contents for a
 #              moment. Off by default until that is fixed.
 # -More        other settings, last word: -More @{ VICTORY_LOG = 'warn' }
@@ -27,6 +27,7 @@ param(
     [string]$Data = '',
     [switch]$RayTracing,
     [switch]$AutoStart,
+    [switch]$NoProbeRays,
     [switch]$ProbeRays,
     [switch]$Hooks,
     [switch]$NoHooks,
@@ -86,12 +87,16 @@ $set = [ordered]@{
     # Picture: the title's character bake waits up to 10 s for its textures (1.5 s by default), and a draw
     # waits up to 500 ms for a pipeline still being made (above) instead of being dropped after 20 ms
     VICTORY_BAKE_TEXTURES_MS = '10000'
+
+    # Picture: the material-class depth plane is current before the title's tiling pass reads it (the base
+    # gave it last frame's)
+    VICTORY_PLANE_NOW = '1'
 }
 if ($Hooks -and -not $NoHooks) {
     # The memory hooks
     $set.VICTORY_GPU_ONLY = '1'; $set.VICTORY_KNOWN_WRITES = '1'
 }
-if ($ProbeRays -and -not $RayTracing) { $set.VICTORY_ACTIVATE_RAYS = '1'; $set.VICTORY_RT_RESOLVE = '1' }
+if (-not $NoProbeRays -and -not $RayTracing) { $set.VICTORY_PROBE_RAYS = '1' }
 if ($RayTracing) { $set.VICTORY_BVH_BUILDER = '1' }
 if ($AutoStart) {
     $set.VICTORY_AUTO_INPUT = 'd>=15,rep(A,1,d<10),w3,d>=20,w1,rep(A,1,d>=35),w1.5,Down,w7,Down,w0.6,A,w1.5,A,w0.7,Down,w0.5,A,w0.7,Down,w0.5,A'
