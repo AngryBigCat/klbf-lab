@@ -142,9 +142,14 @@ fn low_pct_fps(sorted_asc: &[f64], pct: f64) -> f64 {
     if avg_ms > 0.0 { 1000.0 / avg_ms } else { 0.0 }
 }
 
-/// Refuses a results folder inside a source checkout. (Scarlett tree: not checked.)
-fn outside_repo(_dir: &std::path::Path) -> Result<(), String> {
-    Ok(())
+/// Refuses a results folder inside a source checkout (an ancestor with `.victory-root`, as
+/// victory-core's `ensure_outside_repo`, which this crate does not depend on).
+fn outside_repo(dir: &std::path::Path) -> Result<(), String> {
+    let dir = std::path::absolute(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    match dir.ancestors().find(|a| a.join(".victory-root").is_file()) {
+        Some(root) => Err(format!("refusing to write benchmark output {} inside repository {}", dir.display(), root.display())),
+        None => Ok(()),
+    }
 }
 
 fn encode_png(w: u32, h: u32, rgb: &[u8]) -> Vec<u8> {
@@ -1146,6 +1151,7 @@ fn thread(game: HWND, adapter: Option<IDXGIAdapter3>) {
         let (mut title_buf, mut title_back) = (Vec::new(), false);
         // The card at the client size, drawn once per size.
         let mut cache: Option<Bitmap> = None;
+        let mut copied = false;
         let mut msg = std::mem::zeroed::<MSG>();
         while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
             if !(msg.message == WM_TIMER && msg.hwnd == window) {
@@ -1157,6 +1163,10 @@ fn thread(game: HWND, adapter: Option<IDXGIAdapter3>) {
                 if !title_back {
                     title_back = true;
                     set_title(game, &mut title_buf, &normal);
+                    copied = copy_to_clipboard(window, &card.share);
+                    if !copied {
+                        tracing::warn!("KLBF Lab Bench: share line not copied to the clipboard");
+                    }
                 }
                 // Released first, then any press (or 60 s) closes.
                 let now = any_input(&mut pads, false);
@@ -1190,7 +1200,7 @@ fn thread(game: HWND, adapter: Option<IDXGIAdapter3>) {
                 shown_secs = left;
                 let Some(base) = cache.as_ref() else { continue };
                 let mut bm = Bitmap { w: base.w, h: base.h, px: base.px.clone() };
-                footer(&mut bm, &format!("Any key or button closes \u{b7} {left} s"));
+                footer(&mut bm, &format!("Any key or button closes \u{b7} {left} s"), copied);
                 present(window, &bm, origin);
                 SetWindowPos(window, HWND_TOPMOST, origin.x, origin.y, bm.w as i32, bm.h as i32, SWP_NOACTIVATE | SWP_SHOWWINDOW);
                 continue;
@@ -1520,11 +1530,51 @@ fn card_scale(w: usize, h: usize) -> f32 {
     (w as f32 / 1060.0).min(h as f32 / 700.0)
 }
 
-fn footer(bm: &mut Bitmap, s: &str) {
+/// The footer line under the card, and "Share line copied" under it when `copied`.
+fn footer(bm: &mut Bitmap, s: &str, copied: bool) {
     let k = card_scale(bm.w, bm.h);
     let m = text(UI, 14.0 * k, 0.0, s);
-    let y = (bm.h as f32 / 2.0 + 330.0 * k).min(bm.h as f32 - m.h as f32 - 2.0);
+    let lines = if copied { 2.0 } else { 1.0 };
+    let y = (bm.h as f32 / 2.0 + 330.0 * k).min(bm.h as f32 - lines * m.h as f32 - 2.0);
     paint(bm, &m, ((bm.w as f32 - m.adv) / 2.0) as i32, y as i32, 255, [200, 186, 210]);
+    if copied {
+        let c = text(UI, 14.0 * k, 0.0, "Share line copied \u{2014} paste it with your card");
+        paint(bm, &c, ((bm.w as f32 - c.adv) / 2.0) as i32, (y + m.h as f32) as i32, 255, [200, 186, 210]);
+    }
+}
+
+/// Puts `s` on the Windows clipboard as CF_UNICODETEXT; false when any step fails.
+unsafe fn copy_to_clipboard(owner: HWND, s: &str) -> bool {
+    use windows_sys::Win32::Foundation::GlobalFree;
+    use windows_sys::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData};
+    use windows_sys::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
+    // In Win32_System_Ole; not worth that feature for one constant.
+    const CF_UNICODETEXT: u32 = 13;
+    let wide: Vec<u16> = s.encode_utf16().chain(Some(0)).collect();
+    unsafe {
+        let mem = GlobalAlloc(GMEM_MOVEABLE, wide.len() * 2);
+        if mem.is_null() {
+            return false;
+        }
+        let p = GlobalLock(mem).cast::<u16>();
+        if p.is_null() {
+            GlobalFree(mem);
+            return false;
+        }
+        std::ptr::copy_nonoverlapping(wide.as_ptr(), p, wide.len());
+        GlobalUnlock(mem);
+        if OpenClipboard(owner) == 0 {
+            GlobalFree(mem);
+            return false;
+        }
+        // The clipboard owns the memory once SetClipboardData succeeds.
+        let ok = EmptyClipboard() != 0 && !SetClipboardData(CF_UNICODETEXT, mem).is_null();
+        CloseClipboard();
+        if !ok {
+            GlobalFree(mem);
+        }
+        ok
+    }
 }
 
 static TEMPLATE_PX: LazyLock<Option<(usize, usize, Vec<u8>)>> = LazyLock::new(|| decode_png(TEMPLATE));
@@ -1660,6 +1710,12 @@ fn render_card_boxes(c: &Card, w: usize, h: usize, framed: bool) -> (Bitmap, Vec
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn results_stay_out_of_the_source_tree() {
+        assert!(outside_repo(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("bench-results")).is_err());
+        assert!(outside_repo(&std::env::temp_dir().join("bench-results")).is_ok());
+    }
 
     #[test]
     fn title_during_the_run() {
