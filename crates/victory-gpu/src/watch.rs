@@ -128,7 +128,7 @@ struct Journal {
     /// Page ranges asked ahead for a submission's refreshes ([`ask_ahead`])
     /// and the asking that did: `writes` answers for a range inside one
     /// from the journal, without another kernel call.
-    ahead: Vec<(usize, usize)>,
+    ahead: Ahead,
     ahead_asked: u64,
     /// The ahead asking stands for a whole submission ([`ask_once`]): no
     /// other ahead asking is made, and `ahead` stays, until
@@ -142,10 +142,65 @@ struct Journal {
 /// one lock for all of it those threads ran one at a time: 22 of 96 looks at
 /// the submitting thread, and one in six of those at the six threads beside
 /// it, found it waiting for that lock (run pooloff1).
+/// (C3, from another-victory-fork c83e54c) The page ranges of
+/// [`Journal::ahead`]. `VICTORY_AHEAD_SEARCH=1` (default off: one walk through
+/// all of them per question, as before): kept by their starts with, for
+/// each, the furthest end of it and those before it, so whether one holds a
+/// range is found by halving (each refresh asked two or three times, 10,000
+/// refreshes a frame, a few hundred ranges). The same answers either way.
+struct Ahead {
+    ranges: Vec<(usize, usize)>,
+    most: Vec<usize>,
+}
+
+fn ahead_search() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("VICTORY_AHEAD_SEARCH").is_ok_and(|v| v.trim() == "1"))
+}
+
+impl Ahead {
+    const fn new() -> Ahead {
+        Ahead { ranges: Vec::new(), most: Vec::new() }
+    }
+
+    fn set(&mut self, mut ranges: Vec<(usize, usize)>) {
+        self.most.clear();
+        if ahead_search() {
+            ranges.sort_unstable();
+            let mut most = 0;
+            self.most.extend(ranges.iter().map(|r| {
+                most = most.max(r.1);
+                most
+            }));
+        }
+        self.ranges = ranges;
+    }
+
+    fn clear(&mut self) {
+        self.ranges.clear();
+        self.most.clear();
+    }
+
+    fn take(&mut self) -> Vec<(usize, usize)> {
+        self.most.clear();
+        std::mem::take(&mut self.ranges)
+    }
+
+    /// Whether one of the ranges holds pages `[first, last)`.
+    fn holds(&self, first: usize, last: usize) -> bool {
+        if self.most.len() == self.ranges.len() && !self.ranges.is_empty() {
+            // Those that start at `first` or before; of them the furthest end.
+            let n = self.ranges.partition_point(|r| r.0 <= first);
+            return n > 0 && self.most[n - 1] >= last;
+        }
+        self.ranges.iter().any(|&(a, b)| a <= first && last <= b)
+    }
+}
+
 static JOURNAL: RwLock<Journal> = RwLock::new(Journal {
     written: BTreeMap::new(),
     parts: std::collections::HashMap::with_hasher(std::hash::BuildHasherDefault::new()),
-    ahead: Vec::new(),
+    ahead: Ahead::new(),
     ahead_asked: 0,
     kept: false,
 });
@@ -349,7 +404,7 @@ pub(crate) fn ask_ahead(ranges: &[(usize, usize)]) {
     note_hot(&written);
     let mut j = journal_mut();
     j.ahead_asked = next_asking();
-    j.ahead = asked;
+    j.ahead.set(asked);
     let now = j.ahead_asked;
     for (page, parts) in written {
         j.note(page, parts, now);
@@ -542,7 +597,7 @@ fn ask_rest(ranges: &[(usize, usize)]) {
     let _all = Asking::hold_all();
     let mut ahead = {
         let mut j = journal_mut();
-        std::mem::take(&mut j.ahead)
+        j.ahead.take()
     };
     // `ask_ahead` leaves a range that lies alone to `writes`, which asks
     // once per flush: with one asking for the submission that was every
@@ -574,7 +629,7 @@ fn ask_rest(ranges: &[(usize, usize)]) {
         j.note(page, parts, now);
     }
     j.kept = !ahead.is_empty();
-    j.ahead = ahead;
+    j.ahead.set(ahead);
 }
 
 /// The submission's one asking stands no longer: its refreshes are done,
@@ -648,8 +703,7 @@ pub(crate) fn asked(start: usize, end: usize) -> Option<(u64, Vec<(usize, u64)>)
     let (first, last) = (start / PAGE, end.div_ceil(PAGE));
     let j = journal();
     j.ahead
-        .iter()
-        .any(|&(a, b)| a <= first && last <= b)
+        .holds(first, last)
         .then(|| (j.ahead_asked, j.written.range(first..last).map(|(&p, &w)| (p, w)).collect()))
 }
 
@@ -662,7 +716,7 @@ pub(crate) fn writes(start: usize, end: usize, guarded: bool) -> Option<(u64, Ve
     let (first, last) = (start / PAGE, end.div_ceil(PAGE));
     let of = |j: &Journal| -> Vec<(usize, u64)> { j.written.range(first..last).map(|(&p, &w)| (p, w)).collect() };
     // Asked ahead with the submission's other ranges: the journal has it.
-    let ahead = |j: &Journal| j.ahead.iter().any(|&(a, b)| a <= first && last <= b).then(|| (j.ahead_asked, of(j)));
+    let ahead = |j: &Journal| j.ahead.holds(first, last).then(|| (j.ahead_asked, of(j)));
     if let Some(known) = ahead(&journal()) {
         return Some(known);
     }
@@ -746,7 +800,7 @@ pub(crate) fn nothing_new(start: usize, end: usize, base: usize, copied: &[u64],
         crate::faultbook::note(crate::faultbook::What::Known, first, last, 1);
     }
     let j = journal();
-    if !known && !j.ahead.iter().any(|&(a, b)| a <= first && last <= b) {
+    if !known && !j.ahead.holds(first, last) {
         return false;
     }
     let Some(taken) = first.checked_sub(base).and_then(|from| copied.get(from..last - base)) else {
@@ -1990,7 +2044,7 @@ fn open(g: &mut Guards, start: usize, end: usize) -> usize {
                 // pass, as for a mapping (`descriptor::host::remapped`:
                 // locks one mutex of its own and calls nothing).
                 if marks {
-                    crate::descriptor::host::remapped(other & !(BLOCK - 1), BLOCK);
+                    crate::descriptor::host::marked(other & !(BLOCK - 1), BLOCK);
                     REMAP_MARKED[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
                 let other = other / BLOCK;
@@ -2011,6 +2065,36 @@ fn open(g: &mut Guards, start: usize, end: usize) -> usize {
     }
     unguard(g, &blocks);
     here
+}
+
+/// (C3, `VICTORY_REMAP_METER=1`, the runtime's meter in xmem) Our notes of a
+/// change of mapping, every thread, in ns since [`remap_notes_take`]: the
+/// guards, views, descriptor and in-place records the runtime's hooks update
+/// (`title_memory_unmapping`, `_remapped`, `_splitting`, `_view`, the
+/// exact-unmap hook).
+static NOTES_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub(crate) struct NotesTimed(Option<std::time::Instant>);
+
+impl NotesTimed {
+    pub(crate) fn new() -> NotesTimed {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let on = *ON.get_or_init(|| std::env::var("VICTORY_REMAP_METER").is_ok_and(|v| v.trim() == "1"));
+        NotesTimed(on.then(std::time::Instant::now))
+    }
+}
+
+impl Drop for NotesTimed {
+    fn drop(&mut self) {
+        if let Some(t) = self.0 {
+            NOTES_NS.fetch_add(t.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
+/// [`NOTES_NS`] since the last call.
+pub fn remap_notes_take() -> u64 {
+    NOTES_NS.swap(0, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// (C3, item 1b) `VICTORY_REMAP_MARKS`, default off. Why "a texture picked
@@ -2073,9 +2157,13 @@ pub(crate) fn remap_marks_line() {
         return;
     }
     let n: Vec<u64> = REMAP_MARKED.iter().map(|n| n.swap(0, Relaxed)).collect();
+    let s: Vec<u64> = crate::descriptor::host::MARKS.iter().map(|n| n.swap(0, Relaxed)).collect();
     tracing::info!(
-        "remap marks (VICTORY_REMAP_MARKS), last 5 s: {} pages of written views marked for the texture pass; {} textures guarded after upload ({} not all guarded)",
+        "remap marks (VICTORY_REMAP_MARKS), last 5 s: {} pages of written views marked for the texture pass, slots under them {}, \
+         of those uploaded before and made due {}; {} textures guarded after upload ({} not all guarded)",
         n[0],
+        s[0],
+        s[1],
         n[1],
         n[2]
     );
@@ -2286,6 +2374,7 @@ pub(crate) fn views_mapped(section: usize, offset: u64, len: usize) {
 /// ([`views_mapped`]). What is guarded of its pages at other views is opened,
 /// and not guarded again before the change is done ([`Remapping`]).
 pub fn title_memory_splitting(at: usize, len: usize) {
+    let _notes = NotesTimed::new();
     let others: Vec<usize> = elsewhere(at, len).into_iter().flat_map(|(_, others)| others).collect();
     if others.is_empty() {
         return;
@@ -2324,12 +2413,14 @@ static MAPPING: std::sync::RwLock<()> = std::sync::RwLock::new(());
 
 /// What the runtime holds while it changes what title memory shows
 /// ([`title_memory_remapping`]).
-pub struct Remapping(#[allow(dead_code)] std::sync::RwLockWriteGuard<'static, ()>, std::time::Instant);
+pub struct Remapping(#[allow(dead_code)] Changing, std::time::Instant);
 
 impl Drop for Remapping {
     fn drop(&mut self) {
         // (Fox port C) From asking for the lock until it is let go (the frame log).
         crate::framelog::add(crate::framelog::T::RemapUs, self.1.elapsed().as_micros() as u64);
+        #[cfg(feature = "diagnostics")]
+        fine::line();
         // The change is done: what is there now may be guarded.
         if CHANGING.replace((false, false)).1 {
             guards().changing.clear();
@@ -2483,8 +2574,22 @@ pub fn title_memory_remapping() -> Remapping {
             tracing::info!(met, "accesses of title threads that waited for a change of mapping");
         }
     }
+    title_memory_remapping_in(&[(0, usize::MAX)])
+}
+
+/// [`title_memory_remapping`] for a change that touches title memory in
+/// `ranges` (start, end) alone: with `VICTORY_MAP_LOCK_FINE=1` reads in
+/// place of other memory go on meanwhile ([`fine`]); without it, as
+/// [`title_memory_remapping`]. Every address whose mapping the change takes
+/// away or makes, even for a moment (the rest of a view unmapped and mapped
+/// again), must be in `ranges`.
+pub fn title_memory_remapping_in(ranges: &[(usize, usize)]) -> Remapping {
     let asked = std::time::Instant::now();
-    let changing = MAPPING.write().unwrap_or_else(|e| e.into_inner());
+    let changing = if fine::on() {
+        Changing::Fine(fine::write(ranges))
+    } else {
+        Changing::Whole(MAPPING.write().unwrap_or_else(|e| e.into_inner()))
+    };
     crate::framelog::add(crate::framelog::T::Remaps, 1);
     crate::framelog::add(crate::framelog::T::RemapWaitUs, asked.elapsed().as_micros() as u64);
     CHANGES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -2493,24 +2598,227 @@ pub fn title_memory_remapping() -> Remapping {
 }
 
 /// What a read of title memory in place holds ([`title_memory_reading`]).
-pub struct Reading(#[allow(dead_code)] std::sync::RwLockReadGuard<'static, ()>);
+pub struct Reading(#[allow(dead_code)] Read);
+
+#[allow(dead_code)]
+enum Read {
+    Whole(std::sync::RwLockReadGuard<'static, ()>),
+    Fine(fine::ReadGuard),
+}
+
+#[allow(dead_code)]
+enum Changing {
+    Whole(std::sync::RwLockWriteGuard<'static, ()>),
+    Fine(fine::WriteGuard),
+}
 
 /// For reading title memory in place: until what it returns is dropped,
 /// the runtime changes no mapping, so memory found mapped stays mapped.
 /// Not to be taken twice by one thread, nor held across anything that
 /// maps title memory.
 pub fn title_memory_reading() -> Reading {
-    Reading(MAPPING.read().unwrap_or_else(|e| e.into_inner()))
+    title_memory_reading_in(0, usize::MAX)
+}
+
+/// [`title_memory_reading`] of `[at, at + len)` alone: with
+/// `VICTORY_MAP_LOCK_FINE=1` only a change of that memory is waited for.
+pub fn title_memory_reading_in(at: usize, len: usize) -> Reading {
+    if fine::on() {
+        return Reading(Read::Fine(fine::read(at, at.saturating_add(len))));
+    }
+    if let Ok(guard) = MAPPING.try_read() {
+        return Reading(Read::Whole(guard));
+    }
+    let waiting = std::time::Instant::now();
+    let guard = MAPPING.read().unwrap_or_else(|e| e.into_inner());
+    fine::waited(waiting);
+    Reading(Read::Whole(guard))
 }
 
 /// [`title_memory_reading`] if it can be had at once: `None` while the
 /// runtime changes a mapping (or waits to), for a caller that has another
 /// way to read and would rather not wait.
 pub fn title_memory_reading_now() -> Option<Reading> {
+    title_memory_reading_now_in(0, usize::MAX)
+}
+
+/// [`title_memory_reading_now`] of `[at, at + len)` alone (see
+/// [`title_memory_reading_in`]).
+pub fn title_memory_reading_now_in(at: usize, len: usize) -> Option<Reading> {
+    if fine::on() {
+        return fine::try_read(at, at.saturating_add(len)).map(|g| Reading(Read::Fine(g)));
+    }
     match MAPPING.try_read() {
-        Ok(guard) => Some(Reading(guard)),
-        Err(std::sync::TryLockError::Poisoned(e)) => Some(Reading(e.into_inner())),
-        Err(std::sync::TryLockError::WouldBlock) => None,
+        Ok(guard) => Some(Reading(Read::Whole(guard))),
+        Err(std::sync::TryLockError::Poisoned(e)) => Some(Reading(Read::Whole(e.into_inner()))),
+        Err(std::sync::TryLockError::WouldBlock) => {
+            fine::refused();
+            None
+        }
+    }
+}
+
+/// (C3, item 2a) `VICTORY_MAP_LOCK_FINE=1`, default off: the mapping lock by
+/// range. Without it each of the title's mapping calls holds [`MAPPING`]
+/// alone and no read of title memory in place runs anywhere meanwhile; with
+/// it a reader waits only for a change that touches its own range.
+///
+/// Invariant (the guarantee of [`MAPPING`] for every reader of a range R):
+/// while a reader of R holds its guard, no change of mapping of memory
+/// overlapping R is under way. Proof: a reader enters ([`read`]) only when,
+/// under [`State`]'s mutex, no writer whose ranges overlap R is announced,
+/// and it is then listed in `readers` under the same mutex; a writer
+/// ([`write`]) announces its ranges under that mutex first and starts its
+/// change only when, under that mutex, no listed reader overlaps them. Both
+/// checks and both entries are made under one mutex, so of a reader of R and
+/// a writer of an overlapping W whichever is listed first is seen by the
+/// other, which waits: they are never both past their checks. A writer is
+/// announced from before its wait until its guard is dropped, so a reader
+/// arriving meanwhile waits too (writers are not starved). Writers are one
+/// at a time (`WRITER`), as with the lock: the count of changes stays odd
+/// exactly while one is under way ([`changes`]), and the per-thread change
+/// notes ([`CHANGING`]) are as before. Unranged readers and writers take the
+/// whole address space, so they exclude exactly as the lock did.
+pub(crate) mod fine {
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    use std::sync::{Condvar, Mutex, MutexGuard};
+
+    pub(crate) fn on() -> bool {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ON.get_or_init(|| std::env::var("VICTORY_MAP_LOCK_FINE").is_ok_and(|v| v.trim() == "1"))
+    }
+
+    struct State {
+        /// The announced writer's ranges (start, end): waiting or changing.
+        writer: Option<Vec<(usize, usize)>>,
+        /// Readers in place now: their range, and a ticket to find them by.
+        readers: Vec<(usize, usize, u64)>,
+        next: u64,
+    }
+
+    static STATE: Mutex<State> = Mutex::new(State { writer: None, readers: Vec::new(), next: 1 });
+    static MOVED: Condvar = Condvar::new();
+    static WRITER: Mutex<()> = Mutex::new(());
+
+    fn state() -> MutexGuard<'static, State> {
+        STATE.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn overlaps(ranges: &[(usize, usize)], from: usize, to: usize) -> bool {
+        ranges.iter().any(|&(a, b)| a < to && from < b)
+    }
+
+    pub(crate) struct ReadGuard(u64);
+
+    impl Drop for ReadGuard {
+        fn drop(&mut self) {
+            let mut s = state();
+            if let Some(i) = s.readers.iter().position(|r| r.2 == self.0) {
+                s.readers.swap_remove(i);
+            }
+            if s.writer.is_some() {
+                MOVED.notify_all();
+            }
+        }
+    }
+
+    pub(crate) struct WriteGuard(#[allow(dead_code)] MutexGuard<'static, ()>);
+
+    impl Drop for WriteGuard {
+        fn drop(&mut self) {
+            state().writer = None;
+            MOVED.notify_all();
+            // (`WRITER` goes after this, with the field.)
+        }
+    }
+
+    pub(crate) fn read(from: usize, to: usize) -> ReadGuard {
+        let mut s = state();
+        let mut waiting = None;
+        while s.writer.as_deref().is_some_and(|w| overlaps(w, from, to)) {
+            waiting.get_or_insert_with(std::time::Instant::now);
+            s = MOVED.wait(s).unwrap_or_else(|e| e.into_inner());
+        }
+        let ticket = s.next;
+        s.next += 1;
+        s.readers.push((from, to, ticket));
+        drop(s);
+        if let Some(waiting) = waiting {
+            self::waited(waiting);
+        } else {
+            N[3].fetch_add(1, Relaxed);
+        }
+        ReadGuard(ticket)
+    }
+
+    pub(crate) fn try_read(from: usize, to: usize) -> Option<ReadGuard> {
+        let mut s = state();
+        if s.writer.as_deref().is_some_and(|w| overlaps(w, from, to)) {
+            drop(s);
+            refused();
+            return None;
+        }
+        let ticket = s.next;
+        s.next += 1;
+        s.readers.push((from, to, ticket));
+        N[3].fetch_add(1, Relaxed);
+        Some(ReadGuard(ticket))
+    }
+
+    pub(crate) fn write(ranges: &[(usize, usize)]) -> WriteGuard {
+        let one = WRITER.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = state();
+        s.writer = Some(ranges.to_vec());
+        let others = s.readers.iter().any(|r| !overlaps(ranges, r.0, r.1));
+        while s.readers.iter().any(|r| overlaps(ranges, r.0, r.1)) {
+            s = MOVED.wait(s).unwrap_or_else(|e| e.into_inner());
+        }
+        if others {
+            N[5].fetch_add(1, Relaxed);
+        }
+        drop(s);
+        N[6].fetch_add(1, Relaxed);
+        WriteGuard(one)
+    }
+
+    /// Since the last line: reader waits, their µs, the longest; readers that
+    /// did not wait; tries refused; changes made while readers of other
+    /// memory went on (the fine lock's gain); changes.
+    static N: [AtomicU64; 7] = [const { AtomicU64::new(0) }; 7];
+
+    /// A reader waited from `since` until now.
+    pub(crate) fn waited(since: std::time::Instant) {
+        let us = since.elapsed().as_micros() as u64;
+        N[0].fetch_add(1, Relaxed);
+        N[1].fetch_add(us, Relaxed);
+        N[2].fetch_max(us, Relaxed);
+    }
+
+    pub(crate) fn refused() {
+        N[4].fetch_add(1, Relaxed);
+    }
+
+    /// The line every five seconds (with diagnostics, either way).
+    pub(crate) fn line() {
+        static LINE_MS: AtomicU64 = AtomicU64::new(0);
+        let now = crate::host::now_ms();
+        let last = LINE_MS.load(Relaxed);
+        if now < last + 5000 || LINE_MS.compare_exchange(last, now, Relaxed, Relaxed).is_err() {
+            return;
+        }
+        let n: Vec<u64> = N.iter().map(|n| n.swap(0, Relaxed)).collect();
+        tracing::info!(
+            "mapping lock readers (VICTORY_MAP_LOCK_FINE={}), last 5 s: {} waits {:.1} ms (longest {:.1} ms), {} without waiting, \
+             {} tries refused; changes {}, {} of them with readers of other memory going on",
+            u8::from(on()),
+            n[0],
+            n[1] as f64 / 1e3,
+            n[2] as f64 / 1e3,
+            n[3],
+            n[4],
+            n[6],
+            n[5]
+        );
     }
 }
 
@@ -2525,6 +2833,7 @@ pub fn title_memory_reading_now() -> Option<Reading> {
 /// neither guarded nor writable) and a kernel read into it fail, so the
 /// write access is given back.
 pub fn title_memory_remapped(at: usize, len: usize) {
+    let _notes = NotesTimed::new();
     let _timed = crate::framelog::Timed::new(crate::framelog::T::RemapNotesNs);
     crate::texback::remapped(at, len);
     open(&mut title_memory_changed(at, len), at, at.saturating_add(len));
@@ -2536,6 +2845,7 @@ pub fn title_memory_remapped(at: usize, len: usize) {
 /// before the unmapping would leave the address guarded, clean and known by
 /// its bits ([`PUBLISHED`]) with no view behind it.
 pub fn title_memory_unmapping(at: usize, len: usize) {
+    let _notes = NotesTimed::new();
     let _timed = crate::framelog::Timed::new(crate::framelog::T::RemapNotesNs);
     crate::texback::remapped(at, len);
     let mut g = title_memory_changed(at, len);
@@ -2759,7 +3069,7 @@ mod parts_tests {
         let mut j = Journal {
             written: BTreeMap::new(),
             parts: std::collections::HashMap::with_hasher(std::hash::BuildHasherDefault::new()),
-            ahead: Vec::new(),
+            ahead: Ahead::new(),
             ahead_asked: 0,
             kept: false,
         };

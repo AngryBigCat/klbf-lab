@@ -589,6 +589,9 @@ fn hand_out(
     out: *mut This,
 ) -> HRESULT {
     tracing::trace!(?shaders, "pipeline state");
+    // (C3, `VICTORY_PIPELINE_METHODS`) After a failed 0x1c8 / 0x218 call.
+    #[cfg(windows)]
+    crate::device::methods::made(shaders.iter().any(|s| s.stage == "compute"));
     #[cfg(windows)]
     let host = Arc::new(make::Pending::new(shaders.clone(), graphics));
     #[cfg(windows)]

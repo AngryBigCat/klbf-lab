@@ -2247,7 +2247,7 @@ pub(crate) fn mapped_now(at: u64, len: u64) -> Option<bool> {
     if len == 0 {
         return Some(false);
     }
-    let _still = crate::watch::title_memory_reading_now()?;
+    let _still = crate::watch::title_memory_reading_now_in(at as usize, len as usize)?;
     if crate::inplace::shown_bytes(at as usize, len as usize).is_some_and(|b| b > 0) {
         return Some(true);
     }

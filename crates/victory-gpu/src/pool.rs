@@ -87,6 +87,41 @@ fn spares(memory: Option<[u64; 4]>, keep: bool) -> usize {
 /// a second, with up to 18 submissions in the air.)
 const REST: u64 = 2500;
 
+/// (Fox F, memory audit item 1) Milliseconds until a piece of a staging block
+/// given back is used again (`VICTORY_STAGING_REST_MS`; unset: [`REST`], as
+/// cool_fox). A staging piece comes back only when the last host list that
+/// recorded its copy is reset, and a list is reset only after every
+/// submission of it has run ([`crate::list`], `host::HostList::reset`): the
+/// card is done reading it then, so the rest is a second guard only. At
+/// 130-890 MB/s of uploads, 2.5 s of rest held 0.7-3.4 GB of staging blocks
+/// for 60-240 MB live (run-121). A/B candidates: 250, 0. Risk: wrong texels if
+/// some path drops a staging buffer before its copy ran (none known).
+/// Staging blocks are upload heaps in the PC's memory: no texture lies in
+/// them, so the device-loss guard of [`ahead`] is not about them.
+fn staging_rest() -> u64 {
+    static MS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *MS.get_or_init(|| {
+        let ms = std::env::var("VICTORY_STAGING_REST_MS").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(REST);
+        if ms != REST {
+            tracing::info!(ms, "staging pieces rest {ms} ms before they are used again (VICTORY_STAGING_REST_MS; default {REST})");
+        }
+        ms
+    })
+}
+
+/// (Fox F, memory audit item 1) `VICTORY_STAGING_PACK=1`: a staging piece goes
+/// into the fullest block it fits (as `VICTORY_HEAP_PACK` for textures), and
+/// at most [`STAGING_PACKED_KEPT`] empty staging blocks stay, so blocks
+/// empty and go. Default off = cool_fox: first block with room, up to
+/// [`STAGING_KEPT`] empty blocks.
+fn staging_pack() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("VICTORY_STAGING_PACK").is_ok_and(|v| v.trim() == "1"))
+}
+
+/// Empty staging blocks kept with [`staging_pack`] (128 MiB).
+const STAGING_PACKED_KEPT: usize = 2;
+
 fn now() -> u64 {
     crate::host::now_ms()
 }
@@ -217,11 +252,14 @@ struct Pool<B> {
     given_back: u64,
     /// (`VICTORY_HEAP_PACK`) Pieces go into the fullest block they fit.
     pack: bool,
+    /// Milliseconds a piece given back rests ([`REST`]; staging:
+    /// [`staging_rest`]).
+    rest: u64,
 }
 
 impl<B: Clone> Pool<B> {
     const fn new(most: usize) -> Pool<B> {
-        Pool { blocks: Vec::new(), resting: VecDeque::new(), spare: 0, most, retry_growth_at: 0, given_back: 0, pack: false }
+        Pool { blocks: Vec::new(), resting: VecDeque::new(), spare: 0, most, retry_growth_at: 0, given_back: 0, pack: false, rest: REST }
     }
 
     /// (`VICTORY_HEAP_PACK`) Of the blocks `ripe` takes, the fullest one
@@ -336,7 +374,7 @@ impl<B: Clone> Pool<B> {
     }
 
     fn give(&mut self, piece: Piece, now: u64) {
-        self.resting.push_back((now + REST, piece));
+        self.resting.push_back((now + self.rest, piece));
     }
 
     /// Makes the pieces that rested long enough free, and lets go of empty
@@ -425,7 +463,13 @@ pub(crate) fn staging(host: &crate::host::Host, bytes: u64) -> Option<(StagingPi
     }
     // Copies from a buffer begin at multiples of 512.
     let bytes = bytes.next_multiple_of(512);
-    let (piece, memory, again) = lock(&STAGING).take(bytes, 512, now(), || {
+    let mut pool = lock(&STAGING);
+    pool.rest = staging_rest();
+    if staging_pack() {
+        pool.pack = true;
+        pool.most = STAGING_PACKED_KEPT;
+    }
+    let taken = pool.take(bytes, 512, now(), || {
         // Only gate speculative bindless prefetch on staging-pool growth
         // headroom; table-bound textures and decoration bakes are sampled
         // immediately and would otherwise read uninitialized/reused VRAM.
@@ -436,7 +480,9 @@ pub(crate) fn staging(host: &crate::host::Host, bytes: u64) -> Option<(StagingPi
         let (buffer, data) = host.upload_buffer(BLOCK)?;
         crate::host::name(&buffer, || "staging of textures (a block)".into());
         Some(Upload(buffer, data))
-    })?;
+    });
+    drop(pool);
+    let (piece, memory, again) = taken?;
     let owned = StagingPiece(piece);
     // SAFETY: the piece lies in the block's mapping.
     let data = unsafe { memory.1.add(piece.start as usize) };
@@ -543,6 +589,30 @@ pub(crate) fn texture_blocks() -> [u64; 8] {
         out[5] += b.room;
     }
     out[7] = pool.given_back;
+    out
+}
+
+/// (Fox F) For the memory line: staging blocks alive, of them empty; bytes of
+/// pieces taken and not yet given back (live), bytes of pieces given back and
+/// resting; empty staging blocks let go since the start; the rest (ms) and
+/// whether pieces are packed.
+#[cfg(feature = "diagnostics")]
+pub(crate) fn staging_blocks() -> [u64; 7] {
+    let pool = lock(&STAGING);
+    let mut out = [0u64; 7];
+    let mut used = 0;
+    for b in pool.blocks.iter().flatten() {
+        out[0] += 1;
+        if b.free.whole(BLOCK) {
+            out[1] += 1;
+        }
+        used += BLOCK - b.room;
+    }
+    out[3] = pool.resting.iter().map(|(_, p)| p.len).sum();
+    out[2] = used.saturating_sub(out[3]);
+    out[4] = pool.given_back;
+    out[5] = pool.rest;
+    out[6] = u64::from(pool.pack);
     out
 }
 
@@ -843,6 +913,42 @@ mod tests {
         assert!(pool.take(BLOCK, 65536, 30, make).is_none());
         let mut none: Pool<u32> = Pool::new(SPARE);
         assert!(none.take(65536, 65536, 0, || None).is_none());
+    }
+
+    /// (Fox F) A pool's own rest (`VICTORY_STAGING_REST_MS`), and packing
+    /// staging pieces into the fullest block so that the sparse one empties.
+    #[test]
+    fn a_shorter_rest_and_packing_let_a_staging_block_empty() {
+        let mut pool: Pool<u32> = Pool::new(STAGING_PACKED_KEPT);
+        pool.rest = 250;
+        let made = std::cell::Cell::new(0);
+        let make = || {
+            made.set(made.get() + 1);
+            Some(made.get())
+        };
+        let (a, _, _) = pool.take(BLOCK / 2, 512, 0, make).unwrap();
+        let (b, _, _) = pool.take(BLOCK / 2, 512, 0, make).unwrap();
+        let (c, _, _) = pool.take(BLOCK / 4, 512, 0, make).unwrap();
+        assert_eq!((a.block, b.block), (0, 0));
+        assert_eq!(c.block, 1);
+        pool.give(a, 100);
+        // Not before its own rest, then at once.
+        let (d, _, _) = pool.take(BLOCK / 4, 512, 100 + 249, make).unwrap();
+        assert_eq!(d.block, 1, "first fit: block 1 has room, block 0's half rests");
+        let (e, _, again) = pool.take(BLOCK / 4, 512, 100 + 250, make).unwrap();
+        assert_eq!((e.block, e.start, again), (0, 0, true));
+        // Packed: the fullest block that fits takes the piece (block 1 holds
+        // a half, block 0 three quarters).
+        pool.pack = true;
+        let (f, _, _) = pool.take(BLOCK / 8, 512, 400, make).unwrap();
+        assert_eq!(f.block, 0);
+        // Block 1 given back whole goes at once past the kept ones.
+        pool.most = 0;
+        pool.give(c, 500);
+        pool.give(d, 500);
+        pool.rested(750);
+        assert_eq!(pool.blocks(), 1);
+        assert_eq!(pool.given_back, 1);
     }
 
     #[test]

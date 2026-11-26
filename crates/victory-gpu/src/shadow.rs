@@ -1777,6 +1777,15 @@ static BACK_CLASS: [AtomicU64; 7] = [const { AtomicU64::new(0) }; 7];
 /// where the card does the search (`VICTORY_CARD_BUFFERS_MIN_MB`); a
 /// window outside buffers cannot as the code stands.
 pub(crate) fn back_line(frames: f64) {
+    if under_fused() {
+        static LAST: AtomicU64 = AtomicU64::new(0);
+        let now = MERGED_FUSED.load(Ordering::Relaxed);
+        let was = LAST.swap(now, Ordering::Relaxed);
+        tracing::info!(
+            "title bytes under flights compared and put in in one pass (VICTORY_UNDER_FUSED=1): {:.1} pages a frame",
+            (now - was) as f64 / frames
+        );
+    }
     let c: Vec<f64> = BACK_CLASS.iter().map(|c| c.swap(0, Ordering::Relaxed) as f64 / frames).collect();
     if c.iter().all(|&v| v == 0.0) {
         return;
@@ -2172,6 +2181,87 @@ unsafe fn word_runs_avx2(title: &[u8], held: &[u8]) -> Vec<(usize, usize)> {
     runs
 }
 
+/// (C3, from another-victory-fork 6f3ede5) `VICTORY_UNDER_FUSED=1`, default
+/// off: [`Shadow::merge_under_writes`] puts the title's bytes into the CPU's
+/// side of a copy in the card's memory as it compares, a block of 32 bytes
+/// where one of its words differs (off: the runs are found first and copied
+/// one by one afterwards, as before). The same bytes end up there: the words
+/// of a block that do not differ are equal. Their session: 190,000 runs in
+/// 400 pages a frame, each a copy of a few bytes of its own. Counter: the
+/// "pages fused" count in [`MERGED_FUSED`].
+fn under_fused() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("VICTORY_UNDER_FUSED").is_ok_and(|v| v.trim() == "1"))
+}
+
+/// Pages compared and put in in one pass ([`under_fused`]) since the start.
+pub(crate) static MERGED_FUSED: AtomicU64 = AtomicU64::new(0);
+
+/// [`word_runs`], and every 32-byte block of `held` in which a word differs
+/// takes `title`'s bytes (the words of the tail that differ, one by one):
+/// `held` is `title` afterwards.
+fn word_runs_put(at: usize, title: &[u8], held: &mut [u8]) -> Vec<(usize, usize)> {
+    #[cfg(target_arch = "x86_64")]
+    if at % 4 == 0 && title.len() % 4 == 0 && title.len() == held.len() && std::arch::is_x86_feature_detected!("avx2") {
+        // SAFETY: the processor has AVX2, and the lengths are the same.
+        return unsafe { word_runs_put_avx2(title, held) };
+    }
+    let runs = dword_runs(at, title, held, 0);
+    for &(r, m) in &runs {
+        held[r..r + m].copy_from_slice(&title[r..r + m]);
+    }
+    runs
+}
+
+/// # Safety
+/// AVX2, and two slices of one length, whole words.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn word_runs_put_avx2(title: &[u8], held: &mut [u8]) -> Vec<(usize, usize)> {
+    use std::arch::x86_64::*;
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    let mut push = |from: usize, len: usize| match runs.last_mut() {
+        Some((a, n)) if *a + *n == from => *n += len,
+        _ => runs.push((from, len)),
+    };
+    let n = title.len();
+    let mut i = 0;
+    while i + 256 <= n {
+        let mut differ = 0u64;
+        for k in 0..8 {
+            let at = i + 32 * k;
+            // SAFETY: inside both slices (`i + 256 <= n`).
+            unsafe {
+                let now = _mm256_loadu_si256(title.as_ptr().add(at).cast());
+                let old = _mm256_loadu_si256(held.as_ptr().add(at).cast());
+                let block = !_mm256_movemask_ps(_mm256_castsi256_ps(_mm256_cmpeq_epi32(now, old))) as u8;
+                if block != 0 {
+                    _mm256_storeu_si256(held.as_mut_ptr().add(at).cast(), now);
+                }
+                differ |= u64::from(block) << (8 * k);
+            }
+        }
+        while differ != 0 {
+            let first = differ.trailing_zeros();
+            let count = (differ >> first).trailing_ones();
+            push(i + 4 * first as usize, 4 * count as usize);
+            if first + count >= 64 {
+                break;
+            }
+            differ &= u64::MAX << (first + count);
+        }
+        i += 256;
+    }
+    while i + 4 <= n {
+        if title[i..i + 4] != held[i..i + 4] {
+            held[i..i + 4].copy_from_slice(&title[i..i + 4]);
+            push(i, 4);
+        }
+        i += 4;
+    }
+    runs
+}
+
 /// Whether the pages of [`Shadow::merge_under_writes`] are compared on several
 /// threads (`VICTORY_UNDER_WIDE=0`: on the submitting one).
 fn under_wide() -> bool {
@@ -2259,7 +2349,39 @@ pub(crate) fn land_as_before(start: usize, now: usize, held: usize, n: usize, ti
 
 #[cfg(test)]
 mod merge_tests {
-    use super::{PIECE, back_piece, changed_runs, dword_runs, put_changed, word_runs};
+    use super::{PAGE, PIECE, back_piece, changed_runs, dword_runs, put_changed, word_runs, word_runs_put};
+
+    /// (C3, from another-victory-fork 6f3ede5) The fused pass finds the same
+    /// runs as [`word_runs`] and leaves the title's bytes in `held`.
+    #[test]
+    fn word_runs_put_finds_the_word_runs_and_puts_the_title_in() {
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for round in 0..300 {
+            let n = [PAGE, 4096, 256, 260, 4, 0, 1000][round % 7];
+            let held: Vec<u8> = (0..n).map(|_| next() as u8).collect();
+            let mut title = held.clone();
+            let changes = (next() % 600) as usize;
+            for _ in 0..changes.min(n) {
+                let at = (next() as usize) % n.max(1);
+                let len = [1, 3, 4, 40, 300][(next() % 5) as usize].min(n - at);
+                for b in &mut title[at..at + len] {
+                    *b = b.wrapping_add(1 + (next() % 255) as u8);
+                }
+            }
+            let want = word_runs(0, &title, &held);
+            let mut merged = held.clone();
+            let runs = word_runs_put(0, &title, &mut merged);
+            assert_eq!(runs, want, "round {round}");
+            assert_eq!(merged, title, "round {round}");
+            assert!(runs.iter().filter(|r| r.1 > 256).count() <= n / 260 + 1, "round {round}");
+        }
+    }
 
     /// A piece put back takes the GPU's bytes where the copy changed and
     /// the title's everywhere else, reads and writes title memory only from
@@ -3787,6 +3909,37 @@ impl Shadow {
             if self.card.is_some() {
                 // Whole words go up as pairs, all of them in one
                 // dispatch: only what is a copy of its own counts.
+                // (C3, [`under_fused`]) Compared and put in, in one pass,
+                // where the most copies of their own the page can have are
+                // left to take: taken first, what is not used given back.
+                // (Whole words at word offsets of the copy: a copy of its own
+                // is a run of more than 256 bytes, at most n / 260 + 1.)
+                let most = (n / 260 + 1) as i64;
+                let fused = crate::host::words_under()
+                    && under_fused()
+                    // (Runs of 256 bytes or less go as words only when
+                    // our own sends are on: else each run is a copy.)
+                    && crate::host::goes_as_words(0, 4)
+                    && !crate::host::upcheck::on()
+                    && at % 4 == 0
+                    && lo % 4 == 0
+                    && n % 4 == 0
+                    && {
+                        if left.fetch_sub(most, Ordering::Relaxed) >= most {
+                            true
+                        } else {
+                            left.fetch_add(most, Ordering::Relaxed);
+                            false
+                        }
+                    };
+                if fused {
+                    let runs = word_runs_put(lo, title, held);
+                    let own = |&&(r, m): &&(usize, usize)| !crate::host::goes_as_words(at + r, m);
+                    let copies = runs.iter().filter(own).count() as i64;
+                    left.fetch_add(most - copies.min(most), Ordering::Relaxed);
+                    MERGED_FUSED.fetch_add(1, Ordering::Relaxed);
+                    return Ok(Some(runs));
+                }
                 let runs = if crate::host::words_under() { word_runs(lo, title, held) } else { changed_runs(title, held) };
                 let own = |&&(r, m): &&(usize, usize)| !crate::host::words_under() || !crate::host::goes_as_words(at + r, m);
                 let copies = runs.iter().filter(own).count() as i64;
@@ -5374,6 +5527,10 @@ pub(crate) fn by_address(start: u64, len: u64) -> Option<Arc<Shadow>> {
     Some(shadow)
 }
 
+/// (Fox F, memory audit item 3) Windows made since the start and their bytes:
+/// with finer windows or tails, how often one is made again.
+pub(crate) static WINDOWS_MADE: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+
 /// Copies of title memory outside buffers, by (start, length).
 static LOOSE: std::sync::RwLock<BTreeMap<(u64, u64), Arc<Shadow>>> = std::sync::RwLock::new(BTreeMap::new());
 
@@ -5405,19 +5562,33 @@ fn loose(address: u64, end: u64, unsized_ask: bool, any: bool) -> Option<Arc<Sha
             return Some(shadow.clone());
         }
     }
-    let mut map = LOOSE.write().unwrap_or_else(|e| e.into_inner());
-    let (start, len) = if unsized_ask && tails() {
-        let there = map.range((cell, 0)..=(address, u64::MAX)).map(|(key, _)| *key);
-        longest_tail(there, address, end).unwrap_or_else(|| tail_of(address, end))
-    } else if any && fine() && !unsized_ask {
-        // The windows that begin in the ask's cell at or below the ask (one
-        // that begins in a cell below and reaches this far is passed over:
-        // the ask then makes its own).
-        let there = map.range((cell, 0)..=(address, u64::MAX)).map(|(key, _)| *key);
-        holder(there, address, end).unwrap_or(named)
-    } else {
-        named
+    let pick = |map: &BTreeMap<(u64, u64), Arc<Shadow>>| -> (u64, u64) {
+        if unsized_ask && tails() {
+            let there = map.range((cell, 0)..=(address, u64::MAX)).map(|(key, _)| *key);
+            longest_tail(there, address, end).unwrap_or_else(|| tail_of(address, end))
+        } else if any && fine() && !unsized_ask {
+            // The windows that begin in the ask's cell at or below the ask (one
+            // that begins in a cell below and reaches this far is passed over:
+            // the ask then makes its own).
+            let there = map.range((cell, 0)..=(address, u64::MAX)).map(|(key, _)| *key);
+            holder(there, address, end).unwrap_or(named)
+        } else {
+            named
+        }
     };
+    // (Fox F, memory audit item 3) With finer windows or tails the window is
+    // chosen among several: chosen under the shared lock first, and the
+    // writers' lock taken only to make one (before, every such ask took it:
+    // recording threads waited on each other).
+    if fine() {
+        let map = LOOSE.read().unwrap_or_else(|e| e.into_inner());
+        if let Some(shadow) = map.get(&pick(&map)) {
+            note(shadow);
+            return Some(shadow.clone());
+        }
+    }
+    let mut map = LOOSE.write().unwrap_or_else(|e| e.into_inner());
+    let (start, len) = pick(&map);
     if let Some(shadow) = map.get(&(start, len)) {
         note(shadow);
         return Some(shadow.clone());
@@ -5428,6 +5599,8 @@ fn loose(address: u64, end: u64, unsized_ask: bool, any: bool) -> Option<Arc<Sha
         let shadow = Arc::new(Shadow::placed(placed, start, len, true));
         note(&shadow);
         map.insert((start, len), shadow.clone());
+        WINDOWS_MADE[0].fetch_add(1, Ordering::Relaxed);
+        WINDOWS_MADE[1].fetch_add(len, Ordering::Relaxed);
         return Some(shadow);
     }
     // One buffer in the card's memory, filled by the CPU through the bus.
@@ -5441,6 +5614,8 @@ fn loose(address: u64, end: u64, unsized_ask: bool, any: bool) -> Option<Arc<Sha
         let shadow = Arc::new(shadow);
         note(&shadow);
         map.insert((start, len), shadow.clone());
+        WINDOWS_MADE[0].fetch_add(1, Ordering::Relaxed);
+        WINDOWS_MADE[1].fetch_add(len, Ordering::Relaxed);
         return Some(shadow);
     }
     let (buffer, data) = host()?.shared_buffer(len)?;
@@ -5478,6 +5653,8 @@ fn loose(address: u64, end: u64, unsized_ask: bool, any: bool) -> Option<Arc<Sha
     }
     note(&shadow);
     map.insert((start, len), shadow.clone());
+    WINDOWS_MADE[0].fetch_add(1, Ordering::Relaxed);
+    WINDOWS_MADE[1].fetch_add(len, Ordering::Relaxed);
     Some(shadow)
 }
 

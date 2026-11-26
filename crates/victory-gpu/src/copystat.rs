@@ -524,12 +524,19 @@ fn system_memory() -> (u64, u64) {
     (m.ullAvailPhys, m.ullAvailPageFile)
 }
 
-/// Whether the address space is walked for the memory map line
-/// ([`log_memory_map`]). On by default (this module is in diagnostics
-/// builds only); `VICTORY_MEMORY_MAP=0` leaves the walk out.
-fn memory_map() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("VICTORY_MEMORY_MAP").is_none_or(|v| v != "0"))
+/// Every how many memory lines (one each 5 s) the address space is walked
+/// for the memory map line ([`log_memory_map`]): `VICTORY_MEMORY_MAP=<n>`,
+/// 6 if unset (every 30 s, as before), `0` leaves the walk out. (This module
+/// is in diagnostics builds only.) (C3, from another-victory-fork fb28d49:
+/// the walk asks Windows about every region, ~250,000 of them in a street
+/// (0.9 s), and its questions hold the process's memory map: other threads'
+/// write-watch askings and the title's faults wait meanwhile, 11-17 ms.)
+fn memory_map() -> u64 {
+    static EVERY: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *EVERY.get_or_init(|| match std::env::var("VICTORY_MEMORY_MAP") {
+        Ok(v) => v.trim().parse().unwrap_or(6),
+        Err(_) => 6,
+    })
 }
 
 /// Asks which of the pages in `asked` (address, answer) are in physical
@@ -689,23 +696,53 @@ fn log_memory_map() {
             by_allocation.entry(r.0).or_insert((k, 0)).1 += r.2 as u64;
         }
     }
-    let mut groups: HashMap<(usize, usize), (u64, u64)> = HashMap::new();
-    for (base, &(k, bytes)) in &by_allocation {
-        let group = groups.entry((k, whole.get(base).copied().unwrap_or(0))).or_default();
-        group.0 += 1;
-        group.1 += bytes;
+    // (Fox F, memory audit item 2) With `VICTORY_HOLDERS=1` each group also
+    // names its lowest allocation's address and the buffers of ours mapped in
+    // its allocations (none: the driver's or the system's).
+    #[derive(Default)]
+    struct Group {
+        n: u64,
+        bytes: u64,
+        first: usize,
+        ours: Vec<(String, u64)>,
     }
-    let mut groups: Vec<((usize, usize), (u64, u64))> = groups.into_iter().collect();
-    groups.sort_by_key(|g| std::cmp::Reverse(g.1.1));
+    let holders = crate::holders::on();
+    let mut groups: HashMap<(usize, usize), Group> = HashMap::new();
+    for (base, &(k, bytes)) in &by_allocation {
+        let size = whole.get(base).copied().unwrap_or(0);
+        let group = groups.entry((k, size)).or_default();
+        group.n += 1;
+        group.bytes += bytes;
+        group.first = if group.first == 0 { *base } else { group.first.min(*base) };
+        if holders {
+            for (kind, b) in crate::holders::kinds_in(*base, size) {
+                match group.ours.iter_mut().find(|(n, _)| *n == kind) {
+                    Some(e) => e.1 += b,
+                    None => group.ours.push((kind, b)),
+                }
+            }
+        }
+    }
+    let mut groups: Vec<((usize, usize), Group)> = groups.into_iter().collect();
+    groups.sort_by_key(|g| std::cmp::Reverse(g.1.bytes));
     let biggest: Vec<String> = groups
         .iter()
         .take(20)
-        .map(|&((k, size), (n, bytes))| {
+        .map(|((k, size), g)| {
+            let named = if !holders {
+                String::new()
+            } else if g.ours.is_empty() {
+                format!(" [first at {:#x}; none of ours mapped there]", g.first)
+            } else {
+                let ours: Vec<String> = g.ours.iter().map(|(n, b)| format!("{n} {} MB", b >> 20)).collect();
+                format!(" [first at {:#x}; ours: {}]", g.first, ours.join(", "))
+            };
             format!(
-                "{n} of {:.2} MB{}: {} MB",
-                size as f64 / (1 << 20) as f64,
-                if k == 5 { " write-combined" } else { "" },
-                bytes >> 20
+                "{} of {:.2} MB{}: {} MB{named}",
+                g.n,
+                *size as f64 / (1 << 20) as f64,
+                if *k == 5 { " write-combined" } else { "" },
+                g.bytes >> 20
             )
         })
         .collect();
@@ -715,6 +752,11 @@ fn log_memory_map() {
         groups.len(),
         biggest.join("; ")
     );
+    if holders {
+        let kinds: Vec<String> =
+            crate::holders::by_kind().iter().map(|(k, n, b)| format!("{k}: {n} {} MB", b >> 20)).collect();
+        tracing::info!("memory map, buffers of ours mapped by the PC (VICTORY_HOLDERS), by name: {}", kinds.join("; "));
+    }
 }
 
 /// Logs where the memory is: the process and the PC, then what this crate
@@ -744,7 +786,8 @@ fn log_memory() {
     // sixth line; and what the shader table and the pipeline library keep.
     static LINES: AtomicU64 = AtomicU64::new(0);
     static WALKING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    if memory_map() && LINES.fetch_add(1, Relaxed) % 6 == 5 && !WALKING.swap(true, Relaxed) {
+    let every = memory_map();
+    if every != 0 && LINES.fetch_add(1, Relaxed) % every == every - 1 && !WALKING.swap(true, Relaxed) {
         let walk = std::thread::Builder::new().name("victory-memory-map".into()).spawn(|| {
             log_memory_map();
             WALKING.store(false, Relaxed);
@@ -791,6 +834,36 @@ fn log_memory() {
     {
         let [textures, staging] = crate::pool::memory();
         tracing::info!("memory in blocks (VICTORY_TEXTURE_POOL=0 turns them off): {textures} MB of textures, {staging} MB of their staging buffers");
+        // (Fox F, memory audit item 1) What the staging blocks hold.
+        static GIVEN: AtomicU64 = AtomicU64::new(0);
+        let s = crate::pool::staging_blocks();
+        let before = GIVEN.swap(s[4], Relaxed);
+        tracing::info!(
+            "memory, staging blocks: {} alive {:.0} MB held ({} empty), {:.0} MB live in pieces, {:.0} MB resting; \
+             {} empty staging blocks given back in the last 5 s ({} since the start); rest {} ms \
+             (VICTORY_STAGING_REST_MS), packed: {} (VICTORY_STAGING_PACK)",
+            s[0],
+            mb(s[0] << 26),
+            s[1],
+            mb(s[2]),
+            mb(s[3]),
+            s[4].saturating_sub(before),
+            s[4],
+            s[5],
+            s[6] == 1,
+        );
+        // (Fox F, memory audit item 2) Holders no other line meters.
+        let send = crate::host::send_meter();
+        tracing::info!(
+            "memory, holders: send buffers {} alive {:.0} MB, of them {} spare {:.0} MB (oldest idle {:.1} s;              at most {:.0} MB kept, VICTORY_SEND_SPARE_MB); our own allocations of 32 MB and more (DirectStorage,              audio buffers are heap buffers, in 'our own allocations'): {}",
+            send[0],
+            mb(send[1]),
+            send[2],
+            mb(send[3]),
+            send[4] as f64 / 1e3,
+            mb(send[5]),
+            big_blocks(),
+        );
     }
     let targets = crate::resource::targets_census();
     tracing::info!(
@@ -818,6 +891,27 @@ fn log_memory() {
         mb(stagings[1]),
         mb(windows[2]),
     );
+    {
+        // (Fox F, memory audit item 3) How often windows are made (again).
+        static BEFORE: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
+        let made = [0, 1].map(|i| crate::shadow::WINDOWS_MADE[i].load(Relaxed));
+        let d = [made[0], made[1], windows[0]]
+            .iter()
+            .zip(&BEFORE)
+            .map(|(&v, b)| v.saturating_sub(b.swap(v, Relaxed)))
+            .collect::<Vec<u64>>();
+        tracing::info!(
+            "memory, windows made: {} in the last 5 s {:.0} MB, {} let go in the last 5 s; {} made since the start \
+             {:.0} MB (VICTORY_WINDOW_KB={} VICTORY_WINDOW_TAILS={})",
+            d[0],
+            mb(d[1]),
+            d[2],
+            made[0],
+            mb(made[1]),
+            std::env::var("VICTORY_WINDOW_KB").unwrap_or_else(|_| "4096".into()),
+            std::env::var("VICTORY_WINDOW_TAILS").unwrap_or_else(|_| "0".into()),
+        );
+    }
     tracing::info!(
         "memory: {:.0} MB private ({:.0} MB of it in memory; the PC has {:.0} MB free and {:.0} MB \
          left to commit); host copies of title memory: {} alive {:.0} MB, of them {} windows \

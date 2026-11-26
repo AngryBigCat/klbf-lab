@@ -110,6 +110,37 @@ pub(super) struct Memory {
     buffer: ID3D12Resource,
     data: usize,
     size: u64,
+    /// (Fox F) When it was last given back ([`now_ms`], ms).
+    given: u64,
+}
+
+/// (Fox F, memory audit item 2) Send memory alive and its bytes (spare or
+/// held by a submission).
+static ALIVE: [std::sync::atomic::AtomicU64; 2] = [const { std::sync::atomic::AtomicU64::new(0) }; 2];
+
+impl Drop for Memory {
+    fn drop(&mut self) {
+        ALIVE[0].fetch_sub(1, Ordering::Relaxed);
+        ALIVE[1].fetch_sub(self.size, Ordering::Relaxed);
+    }
+}
+
+/// (Fox F) For the holders line: send buffers alive and their bytes, of them
+/// spare and their bytes, the spare's oldest idle time (ms), and the most
+/// kept spare ([`kept`]).
+#[cfg(feature = "diagnostics")]
+pub(crate) fn meter() -> [u64; 6] {
+    let spare = SPARE.lock().unwrap_or_else(|e| e.into_inner());
+    let now = now_ms();
+    let oldest = spare.iter().map(|m| now.saturating_sub(m.given)).max().unwrap_or(0);
+    [
+        ALIVE[0].load(Ordering::Relaxed),
+        ALIVE[1].load(Ordering::Relaxed),
+        spare.len() as u64,
+        spare.iter().map(|m| m.size).sum(),
+        oldest,
+        kept(),
+    ]
 }
 
 // SAFETY: a D3D12 object (free-threaded) and its mapping, with one owner.
@@ -119,8 +150,22 @@ unsafe impl Send for Memory {}
 static SPARE: Mutex<Vec<Memory>> = Mutex::new(Vec::new());
 
 /// At most this much is kept (of the card's memory, with [`on_card`]).
+///
+/// (Fox F, memory audit item 2) `VICTORY_SEND_SPARE_MB=<n>`: at most n MiB
+/// kept (unset: 768 MiB, 256 with [`on_card`], as cool_fox; sized for a big
+/// PC). A/B candidate on a 32 GB PC: 128 (a submission sends 73-93 MB a frame
+/// at most, run card-3: what is kept covers one; a bigger send makes its
+/// buffer anew, an upload buffer of 8-128 MiB).
 fn kept() -> u64 {
-    if on_card() { 256 << 20 } else { 768 << 20 }
+    static MOST: OnceLock<Option<u64>> = OnceLock::new();
+    let most = *MOST.get_or_init(|| {
+        let mb = std::env::var("VICTORY_SEND_SPARE_MB").ok().and_then(|v| v.trim().parse::<u64>().ok());
+        if let Some(mb) = mb {
+            tracing::info!(mb, "send buffers: at most {mb} MiB kept spare (VICTORY_SEND_SPARE_MB)");
+        }
+        mb.map(|mb| mb << 20)
+    });
+    most.unwrap_or(if on_card() { 256 << 20 } else { 768 << 20 })
 }
 
 /// Whether the memory lies in the card's memory, written by the CPU through
@@ -152,15 +197,19 @@ fn memory(host: &Host, size: u64) -> Option<Memory> {
         None => host.upload_buffer(size)?,
     };
     name(&buffer, || "bytes a submission sends up".into());
+    ALIVE[0].fetch_add(1, Ordering::Relaxed);
+    ALIVE[1].fetch_add(size, Ordering::Relaxed);
     Some(Memory {
         buffer,
         data: data as usize,
         size,
+        given: 0,
     })
 }
 
 /// The submission has run.
-pub(super) fn give_back(memory: Memory) {
+pub(super) fn give_back(mut memory: Memory) {
+    memory.given = now_ms();
     let mut spare = SPARE.lock().unwrap_or_else(|e| e.into_inner());
     spare.push(memory);
     spare.sort_by_key(|m| std::cmp::Reverse(m.size));

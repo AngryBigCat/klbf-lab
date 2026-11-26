@@ -2336,7 +2336,30 @@ impl State {
                         if let (Some(sync), Some(copy)) = (sync.as_deref_mut(), crate::resource::host_copy(resource)) {
                             sync.keep.push(copy);
                         }
+                        // (C3, `VICTORY_BAKE_DELTA=1`) The real cause of the bake
+                        // uploads (run-119: 6,584 a 5 s, 2.5 GB, only 46 of a clean
+                        // staging): with a synchronous bake every slot waiting to
+                        // be shown after its list ran was read again and uploaded
+                        // whole into the bake's list, its staging made anew, without
+                        // the `unchanged` look. Now a texture whose host copy holds
+                        // exactly what its memory holds now (`unchanged`: the whole
+                        // memory digested, set only once the upload's list was
+                        // submitted) is not, once submitted work has been settled
+                        // (that upload has then run on the card before the bake).
+                        let held_already = sync.is_some()
+                            && title_fills
+                            && crate::texture::bake_delta_on()
+                            && !crate::texture::ahead::there(resource)
+                            && crate::texture::unchanged(resource, first);
+                        if held_already {
+                            if !settled {
+                                settled = true;
+                                crate::host::settle_for_fence();
+                            }
+                            crate::texture::BAKE_SKIPPED[2].fetch_add(1, Ordering::Relaxed);
+                        }
                         if title_fills
+                            && !held_already
                             && !crate::texture::ahead::there(resource)
                             && (sync.is_some() || !crate::texture::unchanged(resource, first))
                         {

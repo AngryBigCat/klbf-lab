@@ -1828,6 +1828,17 @@ fn timing() -> bool {
 /// allocations a page fault hit (only with device-removed data on), or for
 /// the frame recorder (`VICTORY_RECORD`).
 pub(crate) fn name(object: &impl Interface, text: impl FnOnce() -> String) {
+    // (Fox F) The name of a buffer the holders' meter maps ([`crate::holders`]).
+    #[cfg(feature = "diagnostics")]
+    if crate::holders::noted(object.as_raw() as usize) {
+        let text = text();
+        crate::holders::named(object.as_raw() as usize, &text);
+        return name_noted(object, move || text);
+    }
+    name_noted(object, text);
+}
+
+fn name_noted(object: &impl Interface, text: impl FnOnce() -> String) {
     #[cfg(feature = "diagnostics")]
     if crate::book::on()
         && let Ok(resource) = object.cast::<ID3D12Resource>()
@@ -2942,6 +2953,76 @@ fn blame(kind: &'static str, written: &[(usize, usize)], at: usize, len: usize) 
     blamed.0 = Some(((kind, why, len, from, to - from), at));
 }
 
+/// (C3, item 4; the old tree's P1 "read waits" meter, lean) Each wait of the
+/// submitting thread for landings because a submission reads title memory
+/// flights may write (`WHY_READ`): what read it (from [`blame`]), its time
+/// split into the card still running the flights and the landing after the
+/// card had finished them (the relay thread notes when it found flights run,
+/// [`readwait::card_done`]), whether the bytes read had changed after the
+/// wait (no: the wait was for nothing, e.g. `VICTORY_FILL_TITLE`'s ring of
+/// constants), and the flights and lists in the air. Into the frame log
+/// (`ReadWait*`), so each long frame says it: "read waits N (fill a, copy
+/// b, other c), X ms (card still running Y, landing after Z), bytes changed
+/// after: yes/no, flights F lists L".
+#[cfg(feature = "diagnostics")]
+pub(crate) mod readwait {
+    use crate::framelog::{T, add};
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+
+    static CARD_DONE_US: AtomicU64 = AtomicU64::new(0);
+
+    pub(super) fn card_done() {
+        CARD_DONE_US.store(super::now_us(), Relaxed);
+    }
+
+    pub(super) struct Wait {
+        at: u64,
+        src: usize,
+        bytes: Option<Vec<u8>>,
+    }
+
+    pub(super) fn begin() -> Wait {
+        let named = super::BLAMED.lock().unwrap_or_else(|e| e.into_inner()).0;
+        let (kind, src, len) = named.map_or(("", 0, 0), |((kind, _, len, _, _), at)| (kind, at, len));
+        add(T::ReadWaits, 1);
+        add(
+            match kind {
+                "a fill of upload memory" => T::ReadWaitFill,
+                "a buffer copy's source" | "a buffer copy's destination" | "a buffer copy at its place" => T::ReadWaitCopy,
+                _ => T::ReadWaitOther,
+            },
+            1,
+        );
+        {
+            let line = super::line();
+            let flights = line.line.iter().filter(|l| matches!(l, super::Late::Run(_))).count();
+            add(T::ReadWaitFlights, flights as u64);
+            add(T::ReadWaitLists, line.lists as u64);
+        }
+        let bytes = (len > 0 && len <= 1 << 16).then(|| {
+            let mut b = vec![0u8; len];
+            super::read_into(src as *const u8, &mut b).then_some(b)
+        });
+        Wait { at: super::now_us(), src, bytes: bytes.flatten() }
+    }
+
+    pub(super) fn end(w: Wait) {
+        let now = super::now_us();
+        let all = now.saturating_sub(w.at);
+        let done = CARD_DONE_US.load(Relaxed);
+        let card = if done > w.at { (done - w.at).min(all) } else { 0 };
+        add(T::ReadWaitUs, all);
+        add(T::ReadWaitCardUs, card);
+        add(T::ReadWaitLandUs, all - card);
+        if let Some(before) = w.bytes {
+            let mut after = vec![0u8; before.len()];
+            if super::read_into(w.src as *const u8, &mut after) {
+                add(if after != before { T::ReadChangedYes } else { T::ReadChangedNo }, 1);
+            }
+        }
+    }
+}
+
 /// Why [`card_steps`] left the submission to the wait that comes next.
 #[cfg(feature = "diagnostics")]
 fn refused(why: &'static str) {
@@ -3430,6 +3511,7 @@ fn late_threads() {
 /// as waiting for the card. The caller may hold the submission lock: the
 /// thread that lands flights never takes it.
 fn relay_wait(why: usize, done: impl Fn(&Line) -> bool) {
+    #[cfg_attr(feature = "diagnostics", allow(unused_mut))]
     let mut line = line();
     if done(&line) {
         return;
@@ -3447,10 +3529,23 @@ fn relay_wait(why: usize, done: impl Fn(&Line) -> bool) {
         WHY_FENCE => "waiting for landings: a blocking fence wait",
         _ => "waiting for landings: another reason",
     });
+    // (C3 meter: it takes the line's lock itself, so it is let go meanwhile.)
+    #[cfg(feature = "diagnostics")]
+    let (read_wait, mut line) = if why == WHY_READ {
+        drop(line);
+        let w = readwait::begin();
+        (Some(w), self::line())
+    } else {
+        (None, line)
+    };
     while !done(&line) {
         line = LINE_LANDED.wait(line).unwrap_or_else(|e| e.into_inner());
     }
     drop(line);
+    #[cfg(feature = "diagnostics")]
+    if let Some(w) = read_wait {
+        readwait::end(w);
+    }
     stood(waiting);
     working(was_working);
     let us = waiting.elapsed().as_micros() as u64;
@@ -3535,7 +3630,11 @@ fn relay_worker() {
             }
         };
         match next {
-            Ok(items) => host.relay_land(items, &mut fetch),
+            Ok(items) => {
+                #[cfg(feature = "diagnostics")]
+                readwait::card_done();
+                host.relay_land(items, &mut fetch)
+            }
             Err(target) => {
                 let waiting = std::time::Instant::now();
                 #[cfg(feature = "diagnostics")]
@@ -3768,6 +3867,8 @@ mod panel;
 mod place;
 mod send;
 pub(crate) use send::{goes_as_words, words_under};
+#[cfg(feature = "diagnostics")]
+pub(crate) use send::meter as send_meter;
 #[cfg(feature = "diagnostics")]
 pub(crate) mod spans;
 mod torn;
@@ -8873,6 +8974,7 @@ impl Host {
             && let Some(b) = &buffer
         {
             crate::book::made(b, || "an upload buffer".into());
+            crate::holders::mapped(b, data.cast(), size, "an upload buffer");
         }
         match made {
             Ok(()) => Some((buffer?, data.cast())),
@@ -8927,6 +9029,43 @@ struct Meter {
     logged: std::time::Instant,
     /// The caption the window had, once read.
     caption: Option<Vec<u16>>,
+}
+
+/// (C3, from another-victory-fork f36a0fc) `VICTORY_METER_THREAD=1`, default
+/// off: the frame meter's lines of every 5 s (sorting, system calls, some
+/// forty lines: about 30 ms on the presenting thread once every 5 s) are made
+/// by a thread of ours ("victory-meter"), in order; their counters are read a
+/// moment later than the frames they are divided by (only logged). Unset or
+/// `0`: on the presenting thread, as before.
+fn meter_lines(lines: impl FnOnce() + Send + 'static) {
+    static ON: OnceLock<bool> = OnceLock::new();
+    let on = *ON.get_or_init(|| std::env::var("VICTORY_METER_THREAD").is_ok_and(|v| v.trim() == "1"));
+    type Lines = Box<dyn FnOnce() + Send>;
+    static TO: OnceLock<Option<Mutex<std::sync::mpsc::Sender<Lines>>>> = OnceLock::new();
+    let to = on.then(|| {
+        TO.get_or_init(|| {
+            let (to, from) = std::sync::mpsc::channel::<Lines>();
+            std::thread::Builder::new()
+                .name("victory-meter".into())
+                .spawn(move || {
+                    for lines in from {
+                        lines();
+                    }
+                })
+                .ok()
+                .map(|_| Mutex::new(to))
+        })
+        .as_ref()
+    });
+    match to.flatten() {
+        Some(to) => {
+            let lines: Lines = Box::new(lines);
+            if let Err(back) = to.lock().unwrap_or_else(|e| e.into_inner()).send(lines) {
+                (back.0)();
+            }
+        }
+        None => lines(),
+    }
 }
 
 impl Meter {
@@ -9059,6 +9198,11 @@ impl Meter {
         let drops = crate::pipeline::take_drops();
         if self.logged.elapsed() >= std::time::Duration::from_secs(5) {
             self.logged = std::time::Instant::now();
+            #[cfg(feature = "diagnostics")]
+            let copy_stats_frames = std::mem::take(&mut self.copy_stats_frames) as f64;
+            // (C3, `VICTORY_METER_THREAD`, from another-victory-fork f36a0fc)
+            // The lines of every 5 s: made by a thread of ours when on.
+            let lines = move || {
             tracing::info!(
                 "placed texture views: {} writes of another view of the texture a slot showed (it kept the old view until the new was made)",
                 crate::descriptor::host::KEPT_VIEWS.load(Ordering::Relaxed)
@@ -9206,8 +9350,8 @@ impl Meter {
                     put[2] / 1e6,
                     put[3]
                 );
-                traffic::line(self.copy_stats_frames as f64);
-                crate::copystat::log(std::mem::take(&mut self.copy_stats_frames) as f64);
+                traffic::line(copy_stats_frames);
+                crate::copystat::log(copy_stats_frames);
                 for (why, n) in drops.iter().take(40) {
                     tracing::info!(
                         "dropped {:.1}/frame without a host pipeline: {why}",
@@ -9215,6 +9359,8 @@ impl Meter {
                     );
                 }
             }
+            };
+            meter_lines(lines);
         }
         if self.caption.is_none() {
             // The window's own text, read without a message.
@@ -9790,6 +9936,7 @@ impl Host {
             && let Some(b) = &buffer
         {
             crate::book::made(b, || "a shared buffer".into());
+            crate::holders::mapped(b, data.cast(), size, "a shared buffer");
         }
         match made {
             Ok(()) => Some((buffer?, data.cast())),
@@ -9874,6 +10021,12 @@ impl Host {
                     b.Map(0, None, Some(&mut data))
                 })
         };
+        #[cfg(feature = "diagnostics")]
+        if made.is_ok()
+            && let Some(b) = &buffer
+        {
+            crate::holders::mapped(b, data.cast(), size, "a buffer in card memory the CPU maps");
+        }
         match made {
             Ok(()) => Some((buffer?, data.cast())),
             Err(e) => {

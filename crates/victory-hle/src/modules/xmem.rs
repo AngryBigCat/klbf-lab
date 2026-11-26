@@ -1004,8 +1004,142 @@ enum Call {
     Commit = 13,
 }
 
+/// (C3, item 2c) `VICTORY_REMAP_METER=1`, default off: the title's mapping
+/// calls and the system calls in them, a line every five seconds: per kind of
+/// system call (unmap, split, map, commit) calls, µs and the longest; per
+/// mapping call (CPU view, GPU view copies) calls, pages, µs, of that the
+/// wait for our page table, and calls over 5 ms; and the first 50 system calls
+/// over 5 ms (then every 100th) with the free RAM at that moment.
+mod remap_meter {
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+
+    pub(super) fn on() -> bool {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ON.get_or_init(|| std::env::var("VICTORY_REMAP_METER").is_ok_and(|v| v.trim() == "1"))
+    }
+
+    /// Per system call kind (unmap, split, map, commit): calls, ns, max ns,
+    /// over 5 ms.
+    static SYS: [[AtomicU64; 4]; 4] = [const { [const { AtomicU64::new(0) }; 4] }; 4];
+    /// Mapping calls: calls, pages, ns, wait ns, over 5 ms, max ns.
+    static CALLS: [AtomicU64; 6] = [const { AtomicU64::new(0) }; 6];
+    static LONG_SAID: AtomicU64 = AtomicU64::new(0);
+    /// The mapping lock waited for (ns), and its longest wait.
+    static LOCK: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+
+    pub(super) fn lock(ns: u64) {
+        LOCK[0].fetch_add(ns, Relaxed);
+        LOCK[1].fetch_max(ns, Relaxed);
+    }
+    static LINE_MS: AtomicU64 = AtomicU64::new(0);
+    static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
+    fn free_mb() -> u64 {
+        use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+        // SAFETY: plain data, its size set.
+        let mut m: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
+        m.dwLength = size_of::<MEMORYSTATUSEX>() as u32;
+        // SAFETY: a valid out pointer.
+        if unsafe { GlobalMemoryStatusEx(&mut m) } != 0 { m.ullAvailPhys >> 20 } else { 0 }
+    }
+
+    pub(super) fn sys(kind: usize, ns: u64) {
+        let s = &SYS[kind.min(3)];
+        s[0].fetch_add(1, Relaxed);
+        s[1].fetch_add(ns, Relaxed);
+        s[2].fetch_max(ns, Relaxed);
+        if ns > 5_000_000 {
+            s[3].fetch_add(1, Relaxed);
+            let n = LONG_SAID.fetch_add(1, Relaxed);
+            if n < 50 || n.is_multiple_of(100) {
+                tracing::info!(
+                    kind = ["unmap", "split", "map", "commit"][kind.min(3)],
+                    ms = ns as f64 / 1e6,
+                    free_mb = free_mb(),
+                    n = n + 1,
+                    "remap meter: a system call of a mapping over 5 ms"
+                );
+            }
+        }
+        line();
+    }
+
+    pub(super) fn call(pages: usize, ns: u64, waited: u64) {
+        CALLS[0].fetch_add(1, Relaxed);
+        CALLS[1].fetch_add(pages as u64, Relaxed);
+        CALLS[2].fetch_add(ns, Relaxed);
+        CALLS[3].fetch_add(waited, Relaxed);
+        if ns > 5_000_000 {
+            CALLS[4].fetch_add(1, Relaxed);
+        }
+        CALLS[5].fetch_max(ns, Relaxed);
+    }
+
+    fn line() {
+        let now = EPOCH.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64;
+        let last = LINE_MS.load(Relaxed);
+        if now < last + 5000 || LINE_MS.compare_exchange(last, now, Relaxed, Relaxed).is_err() {
+            return;
+        }
+        let mut text = String::new();
+        for (name, s) in ["unmap", "split", "map", "commit"].iter().zip(&SYS) {
+            let n: Vec<u64> = s.iter().map(|a| a.swap(0, Relaxed)).collect();
+            text.push_str(&format!(
+                "; {name} {} calls {:.1} ms (mean {:.0} us, longest {:.1} ms, over 5 ms {})",
+                n[0],
+                n[1] as f64 / 1e6,
+                if n[0] == 0 { 0.0 } else { n[1] as f64 / n[0] as f64 / 1e3 },
+                n[2] as f64 / 1e6,
+                n[3]
+            ));
+        }
+        let c: Vec<u64> = CALLS.iter().map(|a| a.swap(0, Relaxed)).collect();
+        let lock: Vec<u64> = LOCK.iter().map(|a| a.swap(0, Relaxed)).collect();
+        text.push_str(&format!(
+            "; the mapping lock waited for {:.1} ms (longest {:.1} ms); our notes of the changes (guards, views, records) {:.1} ms",
+            lock[0] as f64 / 1e6,
+            lock[1] as f64 / 1e6,
+            victory_gpu::remap_notes_take() as f64 / 1e6
+        ));
+        tracing::info!(
+            "remap meter (VICTORY_REMAP_METER=1), last 5 s: mapping calls {} of {} pages, {:.1} ms (waiting for our page table {:.1} ms; \
+             longest {:.1} ms, over 5 ms {}){text}; free RAM {} MB",
+            c[0],
+            c[1],
+            c[2] as f64 / 1e6,
+            c[3] as f64 / 1e6,
+            c[5] as f64 / 1e6,
+            c[4],
+            free_mb()
+        );
+    }
+}
+
+/// [`victory_gpu::title_memory_remapping_in`], its wait for the mapping lock
+/// counted by the remap meter.
+fn remapping_in(ranges: &[(usize, usize)]) -> victory_gpu::Remapping {
+    if !remap_meter::on() {
+        return victory_gpu::title_memory_remapping_in(ranges);
+    }
+    let t = std::time::Instant::now();
+    let r = victory_gpu::title_memory_remapping_in(ranges);
+    remap_meter::lock(t.elapsed().as_nanos() as u64);
+    r
+}
+
 /// Runs `f`, a system call, and counts it while the streaming log is on.
 fn counted<T>(call: Call, f: impl FnOnce() -> T) -> T {
+    if remap_meter::on() {
+        let started = std::time::Instant::now();
+        let done = f();
+        let ns = started.elapsed().as_nanos() as u64;
+        remap_meter::sys(match call { Call::Unmap => 0, Call::Split => 1, Call::Map => 2, Call::Commit => 3 }, ns);
+        if super::dstorage::stream_log::on() {
+            MAPPING[call as usize].fetch_add(1, Ordering::Relaxed);
+            MAPPING[call as usize + 1].fetch_add(ns, Ordering::Relaxed);
+        }
+        return done;
+    }
     if !super::dstorage::stream_log::on() {
         return f();
     }
@@ -1022,17 +1156,26 @@ struct Costed {
     /// `None`: a copy of mappings.
     pages: Option<usize>,
     waited: u64,
+    /// (C3, remap meter) Pages, also of a copy of mappings.
+    meter_pages: usize,
 }
 
 impl Costed {
     fn begin(pages: Option<usize>) -> Option<Costed> {
-        super::dstorage::stream_log::on().then(|| Costed { started: std::time::Instant::now(), pages, waited: 0 })
+        (super::dstorage::stream_log::on() || remap_meter::on())
+            .then(|| Costed { started: std::time::Instant::now(), pages, waited: 0, meter_pages: pages.unwrap_or(0) })
     }
 }
 
 impl Drop for Costed {
     fn drop(&mut self) {
         let ns = self.started.elapsed().as_nanos() as u64;
+        if remap_meter::on() {
+            remap_meter::call(self.pages.unwrap_or(self.meter_pages), ns, self.waited);
+            if !super::dstorage::stream_log::on() {
+                return;
+            }
+        }
         let Some(pages) = self.pages else {
             MAPPING[5].fetch_add(1, Ordering::Relaxed);
             MAPPING[6].fetch_add(ns, Ordering::Relaxed);
@@ -1135,7 +1278,7 @@ pub extern "system" fn XMemMapPhysicalPages(
             return address;
         }
     }
-    let _changing = victory_gpu::title_memory_remapping();
+    let _changing = remapping_in(&[affected(&physical, base, n * PAGE)]);
     unmap(&mut physical, base, n * PAGE);
     let Some(pages) = pages else {
         return address;
@@ -1322,11 +1465,14 @@ pub fn map_alias(to: u64, from: u64, len: u64) -> bool {
         DEFER.before(from as usize, len as usize);
     }
     let (to, from, len) = (to as usize, from as usize, len as usize);
-    let _costed = Costed::begin(None);
+    let mut _costed = Costed::begin(None);
+    if let Some(c) = &mut _costed {
+        c.meter_pages = len.div_ceil(PAGE);
+    }
     let _busy = Busy::begin();
     let mut physical = physical();
     // As in `XMemMapPhysicalPages`: no read in place meets the gap.
-    let _changing = victory_gpu::title_memory_remapping();
+    let _changing = remapping_in(&[affected(&physical, to, len)]);
     unmap(&mut physical, to, len);
     for k in (0..len).step_by(PAGE) {
         if from == 0 {
@@ -1416,7 +1562,7 @@ fn map_aliases_now(ranges: &[(u64, u64, u64)]) -> bool {
             ops.push(Op::new(to, slice.flatten()));
             at += 1;
         }
-        let _changing = victory_gpu::title_memory_remapping();
+        let _changing = remapping_in(&affected_ops(&physical, &ops));
         ok &= change(&mut physical, ops);
     }
     ok
@@ -1473,7 +1619,7 @@ fn scatter(wanted: &[(usize, usize)]) -> bool {
             costed.pages = Some(ops.len());
         }
         if !ops.is_empty() {
-            let _changing = victory_gpu::title_memory_remapping();
+            let _changing = remapping_in(&affected_ops(&physical, &ops));
             ok &= change(&mut physical, ops);
         }
         drop(physical);
@@ -2015,6 +2161,41 @@ fn commit_limit_message(
 
 /// Returns `[base, base + len)` to placeholders; views reaching past it
 /// are mapped again outside it.
+/// (C3, `VICTORY_MAP_LOCK_FINE`) The title memory a change of `[base, base +
+/// len)` takes away or maps, even for a moment: that range and every view
+/// that overlaps it whole ([`unmap`] takes a view away whole and maps what
+/// stays of it again).
+fn affected(physical: &Physical, base: usize, len: usize) -> (usize, usize) {
+    let end = base.saturating_add(len);
+    let (mut lo, mut hi) = (base, end);
+    if let Some((&at, &(size, _))) = physical.views.range(..=base).next_back()
+        && at + size > base
+    {
+        lo = lo.min(at);
+        hi = hi.max(at + size);
+    }
+    if end > base + 1 {
+        for (&at, &(size, _)) in physical.views.range(base + 1..end) {
+            hi = hi.max(at + size);
+        }
+    }
+    (lo, hi)
+}
+
+/// [`affected`] of each op's page, joined where they touch.
+fn affected_ops(physical: &Physical, ops: &[Op]) -> Vec<(usize, usize)> {
+    let mut out: Vec<(usize, usize)> = ops.iter().map(|op| affected(physical, op.at, PAGE)).collect();
+    out.sort_unstable();
+    out.dedup_by(|next, last| {
+        if next.0 > last.1 {
+            return false;
+        }
+        last.1 = last.1.max(next.1);
+        true
+    });
+    out
+}
+
 fn unmap(physical: &mut Physical, base: usize, len: usize) {
     // No bytes: no view to return. The search below would still find the
     // view holding `base` and cut it in two there, and its range of views

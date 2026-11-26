@@ -584,7 +584,24 @@ fn text(f: &Frame, fia_max: f64) -> String {
         t(T::WorkerLooks),
         t(T::RecordSlow),
         t(T::RecordLooks),
-        inside_text(&|x| f.t[x as usize], fia_max),
+        format!(
+            // (C3, item 4) `crate::host::readwait` (diagnostics builds).
+            "read waits {:.0} (fill {:.0}, copy {:.0}, other {:.0}), {:.1} ms (card still running the flights {:.1}, landing after \
+             the card had finished {:.1}), bytes read had changed after the wait: yes {:.0} no {:.0}; flights in the air at them {:.0} \
+             (lists {:.0}) | {}",
+            t(T::ReadWaits),
+            t(T::ReadWaitFill),
+            t(T::ReadWaitCopy),
+            t(T::ReadWaitOther),
+            ms(T::ReadWaitUs),
+            ms(T::ReadWaitCardUs),
+            ms(T::ReadWaitLandUs),
+            t(T::ReadChangedYes),
+            t(T::ReadChangedNo),
+            t(T::ReadWaitFlights),
+            t(T::ReadWaitLists),
+            inside_text(&|x| f.t[x as usize], fia_max)
+        ),
     )
 }
 

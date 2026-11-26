@@ -19,6 +19,7 @@ pub static UNMAPPED_SEEN: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
 /// unmap) act on). Called after the unmapping, outside nothing in
 /// particular; with `VICTORY_MAP_DEFER` on the thread that applies it.
 pub fn title_memory_unmapped(at: usize, len: usize) {
+    let _notes = crate::watch::NotesTimed::new();
     if len == 0 {
         return;
     }

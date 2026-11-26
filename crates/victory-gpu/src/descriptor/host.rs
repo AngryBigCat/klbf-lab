@@ -805,6 +805,35 @@ pub(crate) fn page_written(at: usize, len: usize) {
     ranges.push((start, end));
 }
 
+/// (C3, `VICTORY_REMAP_MARKS`) Pages written through one of their views
+/// (`crate::watch::open`), at every view of them, kept for the next texture
+/// pass ([`HostHeap::texture_slots_marked`]); and since the start: slots
+/// under them, of those made due. Locks one mutex and calls nothing.
+static MARKED: Mutex<Vec<(u64, u64)>> = Mutex::new(Vec::new());
+pub(crate) static MARKS: [std::sync::atomic::AtomicU64; 2] = [const { std::sync::atomic::AtomicU64::new(0) }; 2];
+
+pub(crate) fn marked(at: usize, len: usize) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let (start, end) = (at as u64, at.saturating_add(len) as u64);
+    if end <= SPANNED[0].load(Relaxed) || start >= SPANNED[1].load(Relaxed) {
+        return;
+    }
+    let mut ranges = MARKED.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(last) = ranges.last_mut()
+        && last.1 == start
+    {
+        last.1 = end;
+        return;
+    }
+    if ranges.len() >= 1 << 15 {
+        join(&mut ranges);
+        if ranges.len() >= 1 << 15 {
+            ranges.clear();
+        }
+    }
+    ranges.push((start, end));
+}
+
 /// Title memory the runtime mapped, unmapped or is about to write since a
 /// texture pass last took the ranges ([`remapped`]).
 static REMAPPED: Mutex<Vec<(u64, u64)>> = Mutex::new(Vec::new());
@@ -1586,6 +1615,8 @@ impl HostHeap {
             )
         };
         tracing::debug!(count, sampler, "host descriptor heap");
+        #[cfg(feature = "diagnostics")]
+        crate::holders::region(cpu, u64::from(size) * u64::from(step), if sampler { "sampler heap, CPU side" } else { "view heap, CPU side" });
         // SAFETY: a live shader-visible heap.
         let gpu = unsafe { heap.GetGPUDescriptorHandleForHeapStart().ptr };
         GPU_RANGES.lock().unwrap_or_else(|e| e.into_inner()).push((
@@ -1909,6 +1940,7 @@ impl HostHeap {
     pub(crate) fn texture_slots_remapped(&self, frame: u64) -> usize {
         use std::sync::atomic::Ordering::Relaxed;
         self.texture_slots_page_written(frame);
+        self.texture_slots_marked(frame);
         let mut ranges = std::mem::take(&mut *REMAPPED.lock().unwrap_or_else(|e| e.into_inner()));
         if ranges.is_empty() {
             return 0;
@@ -1965,6 +1997,24 @@ impl HostHeap {
     /// upload takes the bytes that are there by then. Slots tables read
     /// are left to their draws. Counted either way; returns how many slots
     /// it made due.
+    /// (C3, `VICTORY_REMAP_MARKS`) The ranges [`marked`] kept: of the slots
+    /// whose placed texture holds bytes of them only those uploaded before
+    /// (and not read through tables lately) are made due, as page writes are
+    /// with `VICTORY_PAGE_WRITES=slots`; the others are uploaded when due
+    /// anyway. (Making every slot under a written view due, as a mapping
+    /// does, took the texture queue from 40-60k due to 168k in run-117.)
+    fn texture_slots_marked(&self, frame: u64) -> usize {
+        let mut ranges = std::mem::take(&mut *MARKED.lock().unwrap_or_else(|e| e.into_inner()));
+        if ranges.is_empty() {
+            return 0;
+        }
+        join(&mut ranges);
+        let [held, _, due] = self.slots_written_under(&ranges, frame, true);
+        MARKS[0].fetch_add(held as u64, std::sync::atomic::Ordering::Relaxed);
+        MARKS[1].fetch_add(due as u64, std::sync::atomic::Ordering::Relaxed);
+        due
+    }
+
     fn texture_slots_page_written(&self, frame: u64) -> usize {
         let ranges = std::mem::take(&mut *PAGE_WRITTEN.lock().unwrap_or_else(|e| e.into_inner()));
         if ranges.is_empty() {

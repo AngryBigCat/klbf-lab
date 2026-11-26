@@ -369,6 +369,14 @@ extern "system" fn unknown_pipeline<const SLOT: usize>(
         // SAFETY: the title's out pointer (a local of its own).
         unsafe { *out = std::ptr::null() };
     }
+    // (C3, item 3) `VICTORY_PIPELINE_METHODS`: still not implemented (the
+    // layout is not established); `=1` counts what the title does next on
+    // this thread (falls back to another creation method, or not), `=dump`
+    // also dumps the first descriptions whole.
+    #[cfg(windows)]
+    if methods::on() {
+        methods::failed(SLOT, desc, _iid, calls);
+    }
     if calls <= 4 || calls.is_power_of_two() {
         // Sixteen 64-bit words at `at`, read through the kernel: neither
         // pointer is known to be mapped.
@@ -397,6 +405,116 @@ extern "system" fn unknown_pipeline<const SLOT: usize>(
         );
     }
     E_NOTIMPL
+}
+
+/// (C3, item 3) `VICTORY_PIPELINE_METHODS` (default off): a meter of the two
+/// creation methods that are not implemented, 0x1c8 and 0x218. Not an
+/// implementation: their descriptions are console-native (a root signature,
+/// then pointer/length pairs, some lengths 0x14-0x1d8 bytes in title memory,
+/// some 0x200-0x2c0 bytes at GPU addresses: native code), and a fork that
+/// wrote 0x218 natively had the 3D picture turn grey, while with the method
+/// failing the title made the same compute programs from ordinary containers
+/// (allforks ab665c7). The dropped draws of run-113 ("being made", "a stage
+/// of the ray-tracing structure builder") are not these methods'. `=1`: per
+/// slot, failed calls, and what the same thread did next: a pipeline made by
+/// another method (a fallback; by kind) or another failed call first;
+/// `=dump`: also the first four descriptions of each slot whole (32 words),
+/// the IID, and the first 64 bytes of every pointer/length pair (DXBC or not).
+/// A line every 5 s: "pipeline methods 0x1c8/0x218 ...".
+#[cfg(windows)]
+pub(crate) mod methods {
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+
+    fn mode() -> u8 {
+        static MODE: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+        *MODE.get_or_init(|| match std::env::var("VICTORY_PIPELINE_METHODS").as_deref().map(str::trim) {
+            Ok("1") => 1,
+            Ok("dump") => 2,
+            _ => 0,
+        })
+    }
+
+    pub(crate) fn on() -> bool {
+        mode() != 0
+    }
+
+    thread_local! {
+        static LAST: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    }
+
+    /// Per slot (0x1c8, 0x218): failed calls; followed by a graphics pipeline
+    /// made, by a compute one, by another failed call.
+    static N: [[AtomicU64; 4]; 2] = [const { [const { AtomicU64::new(0) }; 4] }; 2];
+    static LINE_MS: AtomicU64 = AtomicU64::new(0);
+
+    fn i(slot: usize) -> usize {
+        usize::from(slot == 0x218)
+    }
+
+    fn words(at: usize, n: usize) -> Option<Vec<u64>> {
+        let mut bytes = vec![0u8; n * 8];
+        (at != 0 && crate::host::read_into(at as *const u8, &mut bytes))
+            .then(|| bytes.chunks_exact(8).map(|c| u64::from_le_bytes(c.try_into().unwrap_or([0; 8]))).collect())
+    }
+
+    pub(crate) fn failed(slot: usize, desc: *const u8, iid: *const super::Iid, calls: u32) {
+        if let Some(before) = LAST.replace(Some(slot)) {
+            N[i(before)][3].fetch_add(1, Relaxed);
+        }
+        N[i(slot)][0].fetch_add(1, Relaxed);
+        if mode() == 2 && calls <= 4 {
+            let mut text = String::new();
+            let iid_words = words(iid as usize, 2);
+            if let Some(w) = words(desc as usize, 32) {
+                text.push_str(&format!("words {w:x?}"));
+                for k in 0..31 {
+                    let (at, len) = (w[k] as usize, w[k + 1] as usize);
+                    if at > 0x1_0000 && (1..=0x1_0000).contains(&len) {
+                        let mut head = vec![0u8; len.min(64)];
+                        if crate::host::read_into(at as *const u8, &mut head) {
+                            let hex: String = head.iter().map(|b| format!("{b:02x}")).collect();
+                            text.push_str(&format!(
+                                "; pair at word {k}: {at:#x}+{len:#x}{} {hex}",
+                                if head.starts_with(b"DXBC") { " (DXBC)" } else { "" }
+                            ));
+                        }
+                    }
+                }
+            }
+            tracing::info!(
+                slot = format_args!("{slot:#x}"),
+                calls,
+                iid = format_args!("{iid_words:x?}"),
+                "pipeline methods dump (VICTORY_PIPELINE_METHODS=dump): {text}"
+            );
+        }
+        line();
+    }
+
+    /// A pipeline was made (by an implemented method) on this thread.
+    pub(crate) fn made(compute: bool) {
+        if !on() {
+            return;
+        }
+        if let Some(slot) = LAST.take() {
+            N[i(slot)][if compute { 2 } else { 1 }].fetch_add(1, Relaxed);
+        }
+    }
+
+    fn line() {
+        let now = crate::host::now_ms();
+        let last = LINE_MS.load(Relaxed);
+        if now < last + 5000 || LINE_MS.compare_exchange(last, now, Relaxed, Relaxed).is_err() {
+            return;
+        }
+        let n: Vec<Vec<u64>> = N.iter().map(|s| s.iter().map(|a| a.swap(0, Relaxed)).collect()).collect();
+        tracing::info!(
+            "pipeline methods 0x1c8/0x218 (VICTORY_PIPELINE_METHODS), last 5 s: 0x1c8 failed {}, then the thread made a graphics \
+             pipeline {} / a compute one {} / failed again first {}; 0x218 failed {}, then graphics {} / compute {} / failed again first {}; \
+             pipelines made through them 0 (not implemented)",
+            n[0][0], n[0][1], n[0][2], n[0][3], n[1][0], n[1][1], n[1][2], n[1][3]
+        );
+    }
 }
 
 /// The host device's state: the console's device is removed when the host's is

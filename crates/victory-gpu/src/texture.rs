@@ -696,6 +696,20 @@ thread_local! {
 /// refresh, and there is none: the buffer goes with the upload. Asking guards
 /// the texture's blocks (a change of protection, under the lock every other
 /// refresh wants), and the title's next write there faults to open them.
+pub(crate) fn bake_delta_on() -> bool {
+    bake_delta()
+}
+
+fn bake_delta() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("VICTORY_BAKE_DELTA").is_ok_and(|v| v.trim() == "1"))
+}
+
+/// (C3) Bake uploads left out by `VICTORY_BAKE_DELTA` since the last
+/// "uploads by cause" line, and their staging bytes; and slots of the bake's
+/// flush whose host copy held their bytes already (`draw.rs` `flush_for_bake`).
+pub(crate) static BAKE_SKIPPED: [std::sync::atomic::AtomicU64; 3] = [const { std::sync::atomic::AtomicU64::new(0) }; 3];
+
 fn once() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("VICTORY_TEXTURE_ONCE").is_none_or(|v| v != "0"))
@@ -786,6 +800,24 @@ pub(crate) fn upload_from(list: &HostList, resource: This, first: u32) {
     };
     use std::sync::atomic::Ordering::Relaxed;
     let baking = BAKING.get();
+    // (C3) `VICTORY_BAKE_DELTA=1`: a bake's source that a submitted list
+    // uploaded, not detiled since, and whose memory nothing has written since
+    // the staging buffer was last filled (write-watch or guard, and not a
+    // texture written unseen lately: `hot`), holds on the card what its
+    // memory holds: no copy, no forced re-read; the submission's usual check
+    // still runs ([`bake_delta`]).
+    if baking
+        && bake_delta()
+        && staging.uploaded.load(Relaxed)
+        && !staging.dirty.load(Relaxed)
+        && !staging.on_demand
+        && staging.unwritten_since_filled()
+    {
+        BAKE_SKIPPED[0].fetch_add(1, Relaxed);
+        BAKE_SKIPPED[1].fetch_add(staging.bytes, Relaxed);
+        list.defer_texture(staging);
+        return;
+    }
     if baking {
         staging.exact.store(true, Relaxed);
     }
@@ -862,10 +894,9 @@ pub(crate) fn upload_from(list: &HostList, resource: This, first: u32) {
         };
         staging.expected.store(there, Relaxed);
     }
-    // (C3) Uploads by cause, a line every 5 s (diagnostics).
     let _first = copy.uploads.fetch_add(1, Relaxed) == 0;
     #[cfg(feature = "diagnostics")]
-    cause::upload(_first, copy.remade.load(Relaxed), baking, staging.bytes);
+    let (_was_uploaded, _was_clean) = (staging.uploaded.load(Relaxed), !staging.dirty.load(Relaxed));
     // (C3) `VICTORY_PARTIAL_DELTA=1`: the subresources this host copy was
     // given the same bytes for are left out of the list's copy ([`delta`]).
     if delta::on() && picking.is_some() && !baking && copy.uploads.load(Relaxed) > 1 {
@@ -881,6 +912,30 @@ pub(crate) fn upload_from(list: &HostList, resource: This, first: u32) {
         }
         drop(plan);
         delta::line();
+    }
+    // (C3) Uploads by cause, a line every 5 s (diagnostics): the bytes the
+    // list copies (with `VICTORY_PARTIAL_DELTA`, without the parts left out).
+    #[cfg(feature = "diagnostics")]
+    {
+        let left_out: u64 = match staging.delta.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            Some(plan) => (0..staging.footprints.len())
+                .filter(|&i| plan.skips(i))
+                .map(|i| {
+                    let f = staging.footprints[i].Footprint;
+                    u64::from(f.RowPitch) * u64::from(staging.rows[i]) * u64::from(f.Depth)
+                })
+                .sum(),
+            None => 0,
+        };
+        cause::upload(
+            _first,
+            copy.remade.load(Relaxed),
+            baking,
+            picking.is_some(),
+            _was_uploaded,
+            _was_clean,
+            staging.bytes.saturating_sub(left_out),
+        );
     }
     record_upload(list, resource, texture, &staging, &staging.buffer, staging.base);
     // When the list is submitted, its copy takes what the staging buffer
@@ -1028,7 +1083,7 @@ fn fill_plane(
     bytes: usize,
     pitch: usize,
 ) {
-    let _pin = crate::watch::title_memory_reading();
+    let _pin = crate::watch::title_memory_reading_in(at, len);
     // SAFETY: the list owns this full upload allocation until its GPU work completes.
     let out = unsafe { std::slice::from_raw_parts_mut(dst as *mut u8, bytes) };
     let mip = &layout.mips[0];
@@ -1291,6 +1346,30 @@ impl Staging {
         *self.holds.lock().unwrap_or_else(|e| e.into_inner()) = hash.map(|hash| (self.first, hash));
     }
 
+    /// (C3, `VICTORY_BAKE_DELTA`) Whether nothing has written the texture's
+    /// memory since the staging buffer was last filled, by what the
+    /// submission's check would ask first (the write-watch, else the guard),
+    /// and it is not one the hash lately found written unseen (hot). Asks
+    /// without noting the asking: the check at submission sees the same.
+    fn unwritten_since_filled(&self) -> bool {
+        let (start, size) = (self.memory as usize, self.read);
+        let last = self.last.lock().unwrap_or_else(|e| e.into_inner());
+        if last.asked == 0 || last.hash.is_none() && self.once.load(std::sync::atomic::Ordering::Relaxed) {
+            return false;
+        }
+        if let Some((_, written)) = crate::watch::writes(start, start + size, false) {
+            return written.iter().all(|&(_, w)| w <= last.asked);
+        }
+        let hot = hot_textures() && crate::frame::current() < last.hot_until;
+        if hot || last.hot_until == 0 {
+            return false;
+        }
+        match crate::watch::writes(start, start + size, true) {
+            Some((_, written)) => written.iter().all(|&(_, w)| w <= last.asked),
+            None => false,
+        }
+    }
+
     /// Detiles the texture memory into the staging buffer if it changed
     /// since the last time (and is mapped at all).
     pub(crate) fn refresh(&self) {
@@ -1403,12 +1482,12 @@ impl Staging {
             // Not waited for: while the runtime remaps title memory the
             // texture is read through the kernel instead, whole or not at
             // all (`no_wait`).
-            let Some(mapped) = crate::watch::title_memory_reading_now() else {
+            let Some(mapped) = crate::watch::title_memory_reading_now_in(start, size) else {
                 return self.refresh_unlocked(last, size);
             };
             mapped
         } else {
-            waited(2, crate::watch::title_memory_reading)
+            waited(2, || crate::watch::title_memory_reading_in(start, size))
         };
         if !committed(self.memory, size) {
             // Partly mapped: a streamed texture with only some mips' pages

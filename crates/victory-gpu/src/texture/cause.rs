@@ -20,18 +20,41 @@ pub(crate) const FIRST: usize = 2;
 pub(crate) const PARTIAL: usize = 3;
 pub(crate) const CHANGED: usize = 4;
 pub(crate) const OTHER: usize = 5;
-const NAMES: [&str; 6] = ["bake", "made again after let go", "first", "partial growth", "changed after upload", "other"];
+const DRAW_CHANGED: usize = 6;
+const DRAW_NEW: usize = 7;
+const BAKE_CLEAN: usize = 8;
+const NAMES: [&str; 9] = [
+    "bake",
+    "made again after let go",
+    "first",
+    "partial growth",
+    "changed after upload",
+    "other picked by index (levels judged anew, waiting levels, staging gone)",
+    "draw read, changed by the check at a submission",
+    "draw read, its staging buffer made anew",
+    "(of bake) its staging buffer uploaded and not detiled since",
+];
 
 thread_local! {
     /// Set by the texture pass around the upload it records: why.
     pub(crate) static NEXT: std::cell::Cell<usize> = const { std::cell::Cell::new(OTHER) };
 }
 
-static N: [[AtomicU64; 2]; 6] = [const { [const { AtomicU64::new(0) }; 2] }; 6];
+static N: [[AtomicU64; 2]; 9] = [const { [const { AtomicU64::new(0) }; 2] }; 9];
 static LINE_MS: AtomicU64 = AtomicU64::new(0);
 
-pub(crate) fn upload(first: bool, remade: bool, baking: bool, bytes: u64) {
-    let next = NEXT.get();
+pub(crate) fn upload(first: bool, remade: bool, baking: bool, picking: bool, staged_before: bool, clean: bool, bytes: u64) {
+    if baking && staged_before && clean {
+        N[BAKE_CLEAN][0].fetch_add(1, Relaxed);
+        N[BAKE_CLEAN][1].fetch_add(bytes, Relaxed);
+    }
+    let next = if picking {
+        NEXT.get()
+    } else if staged_before {
+        DRAW_CHANGED
+    } else {
+        DRAW_NEW
+    };
     let cause = if baking {
         BAKE
     } else if first && remade {
@@ -56,9 +79,19 @@ fn line() {
     let mut total = [0u64; 2];
     for (name, n) in NAMES.iter().zip(&N) {
         let (count, bytes) = (n[0].swap(0, Relaxed), n[1].swap(0, Relaxed));
-        total[0] += count;
-        total[1] += bytes;
+        if !name.starts_with("(of") {
+            total[0] += count;
+            total[1] += bytes;
+        }
         text.push_str(&format!("; {name} {count} ({} MB)", bytes >> 20));
     }
-    tracing::info!("uploads by cause, last 5 s: {} uploads {} MB{text}", total[0], total[1] >> 20);
+    let skipped = [0, 1, 2].map(|i| super::BAKE_SKIPPED[i].swap(0, Relaxed));
+    tracing::info!(
+        "uploads by cause, last 5 s: {} uploads {} MB{text}; bake uploads left out as unwritten (VICTORY_BAKE_DELTA=1) {} ({} MB), bake flush slots whose host copy held their bytes {}",
+        total[0],
+        total[1] >> 20,
+        skipped[0],
+        skipped[1] >> 20,
+        skipped[2]
+    );
 }

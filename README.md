@@ -51,6 +51,46 @@ D-pad); for a hands-off run add `VICTORY_AUTO_INPUT` as in `tools/run-auto.sh`.
 Build: `cargo build --profile diag -p victory --features diagnostics --locked` (the pinned toolchain in
 `rust-toolchain.toml`, MSVC build tools and a Windows SDK).
 
+## Run it as in run-128 (run-118 plus the memory set)
+
+Same as above, with these added to `$set` before the `-split` line (everything else, the build and the launch line,
+unchanged):
+
+```powershell
+$set += @'
+
+VICTORY_BAKE_DELTA=1 VICTORY_MAP_LOCK_FINE=1
+VICTORY_STAGING_REST_MS=250 VICTORY_STAGING_PACK=1 VICTORY_SEND_SPARE_MB=128
+VICTORY_WINDOW_KB=1024 VICTORY_WINDOW_TAILS=1 VICTORY_HEAP_PACK=1 VICTORY_LIST_POOL_IDLE_S=10
+VICTORY_HOLDERS=1 VICTORY_MEMORY_MAP=6
+'@
+```
+
+What the additions do: a bake no longer uploads unchanged source textures again (`BAKE_DELTA`); a page-mapping call
+blocks only readers of the range it changes (`MAP_LOCK_FINE`); staging blocks are released after 250 ms and packed;
+the spare of send buffers is cut from about 768 MB to 128 MB; windows of title memory are sized to what is asked and
+their unused tails released; texture pieces go into the fullest block; idle command lists are let go after 10 s. The
+last line only adds two meters (which buffers sit in the large allocations; the address-space walk).
+
+### run-128 against run-118
+
+| | run-118 set | run-128 set |
+|---|---|---|
+| Opening route: memory commit, median / peak | 32.5 / 36.5 GB | 32.0 / 35.7 GB |
+| Opening route: free RAM, mean | 4.5-5.6 GB | 6.1 GB |
+| Opening route: ms per frame at 1-2.5k / 2.5-4k / over 4k draws | 41 / 50 / 61 | 58 / 70 / 76 |
+| Opening route: 5-second periods with a frame over 500 ms | 11 | 10 |
+| Prison scene (hand-played, 5.5-8.6k draws): ms per frame | about 70 | about 70 |
+| Prison scene: frames over 1.5x the usual | 4.8 % | 2.7 % |
+| Prison scene: memory commit, median / peak | 34.4 / 36.2 GB | 32.7 / 34.0 GB |
+
+Read the frame times with care: the same build and settings measured twice on this PC gave 49 and 62 ms at 2,500-4,000
+draws (runs 121 and 126), so differences under about 15 ms between single runs prove nothing; run-128's higher figures
+on the opening route are inside that band. What is solid: the memory figures (commit does not swing between runs) and
+each switch's own counter line. So run-128 is the lower-memory set at the same speed as far as can be told; run-118 is
+the set with the fewest moving parts. In the prison scene the card is the limit (90-96 % busy), which neither set
+changes.
+
 ## What was added to cool_fox
 
 Always on:
@@ -74,6 +114,10 @@ Switches, off by default (the base's behaviour is kept unless a run showed a gai
   flights. In the best set.
 - `VICTORY_REFRESH_ONCE=1` (+`=verify`) — part of the standing run set, so it was on in every measured run,
   the floor included.
+- `VICTORY_BAKE_DELTA=1`, `VICTORY_MAP_LOCK_FINE=1`, `VICTORY_STAGING_REST_MS`, `VICTORY_STAGING_PACK=1`,
+  `VICTORY_SEND_SPARE_MB`, `VICTORY_WINDOW_KB` / `VICTORY_WINDOW_TAILS=1`, `VICTORY_HOLDERS=1` - the memory and
+  upload set of run-128 (see above): about 1 GB less commit on the opening route, about 2 GB less in the prison
+  scene; bake uploads of unchanged textures go to zero; no reader waits on the mapping lock.
 - `VICTORY_MAP_DEFER`, `VICTORY_REMAP_SAME`, `VICTORY_DSTORAGE_OLDEST_FIRST`, `VICTORY_DSTORAGE_WORKERS`,
   `VICTORY_AFFINITY=free`, `VICTORY_HEAP_PACK`, `VICTORY_STAGING_SPARE_BLOCKS`, `VICTORY_CHUNK_FINAL`, `VICTORY_CHUNK_COUNT`, `VICTORY_BIND_FILTER`, `VICTORY_PREPARE_WIDE`,
   `VICTORY_WAVE_PAIRS_FIRST`, `VICTORY_ONE_MODE_PER_REGISTER`, `VICTORY_HOIST_LOADS`: ported or new; no gain shown
@@ -83,6 +127,8 @@ Switches, off by default (the base's behaviour is kept unless a run showed a gai
 ## Known problems
 
 - Bushes and some trees glow purple; purple patches linger for a few seconds in some scenes (present in the base).
+- Measured frame times vary by 13-18 ms between identical runs on the test PC; see the note under the run-128
+  table.
 - Texture pop-in: about 46 GB of texture copies are let go and 10 GB made again in six minutes; the card's 64 MB
   pool blocks hold about 3 GB of holes.
 - About 80 s of a 6-minute run is spent in frames over 150 ms: mostly the game's page-mapping calls under low free

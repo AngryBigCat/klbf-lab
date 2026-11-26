@@ -102,6 +102,50 @@ const WAIT_NS: usize = 6;
 const WAIT_MAX_NS: usize = 7;
 const DEPTH_MAX: usize = 8;
 
+/// (C3, item 2b) `VICTORY_MAP_DEFER_BATCH` (default off: a waiter applies
+/// every pending operation up to the newest on its pages, in one hold of the
+/// apply lock, as before): `=N` at most N pages per hold, `=Nms` at most N
+/// milliseconds per hold (`=1`: 64 pages); either way a waiter applies only
+/// what its range needs ([`Deferrer::before_exact`]). Since the last line:
+/// such waits, operations they applied, operations they left pending, the
+/// longest hold (µs).
+static M2: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+
+fn batch_setting() -> Option<(usize, u64)> {
+    #[cfg(test)]
+    if TEST_BATCH.with(|t| t.get()) {
+        return Some((2, u64::MAX));
+    }
+    static SET: std::sync::OnceLock<Option<(usize, u64)>> = std::sync::OnceLock::new();
+    *SET.get_or_init(|| {
+        let v = std::env::var("VICTORY_MAP_DEFER_BATCH").ok()?;
+        let v = v.trim();
+        if v.is_empty() || v == "0" {
+            return None;
+        }
+        if v == "1" {
+            return Some((64, u64::MAX));
+        }
+        if let Some(ms) = v.strip_suffix("ms") {
+            return ms.trim().parse().ok().map(|ms: u64| (usize::MAX, ms.max(1)));
+        }
+        v.parse().ok().map(|n: usize| (n.max(1), u64::MAX))
+    })
+}
+
+fn batch_on() -> bool {
+    batch_setting().is_some()
+}
+
+fn batch() -> (usize, u64) {
+    batch_setting().unwrap_or((usize::MAX, u64::MAX))
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_BATCH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 thread_local! {
     /// This thread applies operations (no deferral, no waiting on itself),
     /// and why: 1 the worker, 2 a thread that needed them, 3 a helper.
@@ -209,8 +253,104 @@ impl Deferrer {
         if q.ops.is_empty() {
             self.any.store(false, Release);
         }
-        self.applied.store(seq, Release);
+        // Everything older than the oldest still pending is applied (with
+        // `VICTORY_MAP_DEFER_BATCH` operations may go out of order).
+        let below = q.ops.front().map_or(q.next - 1, |&(s, _)| s - 1);
+        let _ = seq;
+        self.applied.store(below, Release);
         true
+    }
+
+    /// (C3, item 2b) Applies the pending operation `seq` out of turn (the
+    /// caller holds `apply_lock`); false if it is not pending any more.
+    fn apply_one(&self, seq: u64, why: u8) -> bool {
+        let op = {
+            let mut q = self.queue();
+            let Some(i) = q.ops.iter().position(|&(s, _)| s == seq) else {
+                return false;
+            };
+            q.ops.remove(i).map(|(_, op)| op)
+        };
+        let Some(op) = op else {
+            return false;
+        };
+        let was = APPLYING.with(|a| a.replace(why));
+        (self.apply)(&op);
+        APPLYING.with(|a| a.set(was));
+        M[[0, BY_WORKER, BY_READER, BY_HELPER][usize::from(why)]].fetch_add(1, Relaxed);
+        let mut q = self.queue();
+        let pages = op.pages();
+        q.pages -= pages.len();
+        for p in pages {
+            if q.pending.get(&p) == Some(&seq) {
+                q.pending.remove(&p);
+            }
+        }
+        if q.ops.is_empty() {
+            self.any.store(false, Release);
+        }
+        let below = q.ops.front().map_or(q.next - 1, |&(s, _)| s - 1);
+        self.applied.store(below, Release);
+        true
+    }
+
+    /// (C3, item 2b) `VICTORY_MAP_DEFER_BATCH`: what `[at, at + len)` needs
+    /// before it is mapped or read, and nothing else: the pending operations
+    /// up to the newest on its pages that share a page with it or, going back,
+    /// with one taken (so every operation on a page that comes before a taken
+    /// one on that page is taken too: per page the call order stays; the
+    /// ones left share no page with any taken, and their order against them
+    /// does not matter, see the module's header). Applied oldest first, the
+    /// apply lock let go after every [`batch`] pages or milliseconds so the
+    /// worker and other waiters get their turn.
+    fn before_exact(&self, at: usize, len: usize, newest: u64) {
+        let t = std::time::Instant::now();
+        let selected: Vec<u64> = {
+            let q = self.queue();
+            let mut spans: Vec<(usize, usize)> = vec![(at / PAGE, at.saturating_add(len).div_ceil(PAGE))];
+            let mut taken = Vec::new();
+            for &(seq, op) in q.ops.iter().rev() {
+                if seq > newest {
+                    continue;
+                }
+                let p = op.pages();
+                if spans.iter().any(|&(a, b)| a < p.end && p.start < b) {
+                    spans.push((p.start, p.end));
+                    taken.push(seq);
+                }
+            }
+            M2[2].fetch_add(q.ops.iter().filter(|&&(s, _)| s <= newest).count() as u64 - taken.len() as u64, Relaxed);
+            taken.reverse();
+            taken
+        };
+        let (most_pages, most_ms) = batch();
+        let mut i = 0;
+        while i < selected.len() {
+            let held = std::time::Instant::now();
+            let _site = victory_gpu::hangwatch::at(&"map deferral: a mapping or a reader applies the pending unmaps it needs (apply lock)");
+            let _g = self.apply_lock.lock().unwrap_or_else(|e| e.into_inner());
+            let mut pages = 0;
+            while i < selected.len() {
+                let seq = selected[i];
+                i += 1;
+                let n = self.queue().ops.iter().find(|&&(s, _)| s == seq).map_or(0, |(_, op)| op.pages().len());
+                if self.apply_one(seq, 2) {
+                    M2[1].fetch_add(1, Relaxed);
+                    pages += n;
+                }
+                if pages >= most_pages || held.elapsed().as_millis() as u64 >= most_ms {
+                    break;
+                }
+            }
+            drop(_g);
+            M2[3].fetch_max(held.elapsed().as_micros() as u64, Relaxed);
+            std::thread::yield_now();
+        }
+        M2[0].fetch_add(1, Relaxed);
+        let ns = t.elapsed().as_nanos() as u64;
+        M[WAITS].fetch_add(1, Relaxed);
+        M[WAIT_NS].fetch_add(ns, Relaxed);
+        M[WAIT_MAX_NS].fetch_max(ns, Relaxed);
     }
 
     fn work(&self) {
@@ -266,7 +406,11 @@ impl Deferrer {
             return;
         }
         if let Some(seq) = self.newest(at, len) {
-            self.ensure(seq, 2);
+            if batch_on() {
+                self.before_exact(at, len, seq);
+            } else {
+                self.ensure(seq, 2);
+            }
         }
     }
 
@@ -322,7 +466,20 @@ pub(crate) fn take_line() -> String {
         m[WAIT_MAX_NS] as f64 / 1e6,
         m[BY_HELPER],
         m[DEPTH_MAX],
-    )
+    ) + &{
+        let n: Vec<u64> = M2.iter().map(|a| a.swap(0, Relaxed)).collect();
+        if batch_on() {
+            format!(
+                "; exact waits (VICTORY_MAP_DEFER_BATCH) {} applied {} ops, left {} ops pending that they did not need; longest hold of the apply lock {:.2} ms",
+                n[0],
+                n[1],
+                n[2],
+                n[3] as f64 / 1e3
+            )
+        } else {
+            String::new()
+        }
+    }
 }
 
 #[cfg(test)]
@@ -412,6 +569,32 @@ mod tests {
         // Still in call order, whoever applied them.
         let order: Vec<Op> = log.iter().map(|e| e.1).collect();
         assert_eq!(order, (0..40).map(|k| cpu(2000 + 2 * k, 2)).collect::<Vec<_>>());
+        SLOW_MS.store(0, Relaxed);
+    }
+
+    /// (C3) `VICTORY_MAP_DEFER_BATCH`: a waiter applies what its page needs,
+    /// with every earlier operation sharing a page with those, in call order;
+    /// its page is then not pending.
+    #[test]
+    fn an_exact_wait_keeps_each_pages_order() {
+        let _one = ONE.lock().unwrap_or_else(|e| e.into_inner());
+        TABLE.lock().unwrap().clear();
+        SLOW_MS.store(5, Relaxed);
+        TEST_BATCH.with(|t| t.set(true));
+        let d = leak(LIMIT_PAGES);
+        d.defer(cpu(500, 2)); // pages 500, 501
+        d.defer(cpu(600, 1));
+        d.defer(cpu(400, 1));
+        d.defer(cpu(501, 1)); // page 501 again
+        d.before(501 * PAGE, PAGE);
+        assert!(!d.pending_at(500 * PAGE) && !d.pending_at(501 * PAGE));
+        let log: Vec<Op> = TABLE.lock().unwrap().iter().map(|e| e.1).collect();
+        let first = log.iter().position(|&o| o == cpu(500, 2)).unwrap();
+        let second = log.iter().position(|&o| o == cpu(501, 1)).unwrap();
+        assert!(first < second, "{log:?}");
+        d.drain();
+        assert_eq!(TABLE.lock().unwrap().len(), 4, "each applied once");
+        TEST_BATCH.with(|t| t.set(false));
         SLOW_MS.store(0, Relaxed);
     }
 }

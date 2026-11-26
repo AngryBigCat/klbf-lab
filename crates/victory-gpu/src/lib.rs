@@ -42,6 +42,8 @@ pub mod hlehooks; // (fox port A) runtime notes with no fox GPU function yet (ti
 #[cfg(windows)] pub mod shell; // (fox port A) caption text and the game's logo icons
 #[cfg(all(windows, feature = "diagnostics"))]
 mod book;
+#[cfg(all(windows, feature = "diagnostics"))]
+mod holders; // (fox F) VICTORY_HOLDERS: which buffer of ours lies where in the PC's memory
 #[cfg(windows)]
 mod host;
 #[cfg(windows)]
@@ -122,6 +124,6 @@ pub use inplace::{title_memory_freeing, title_memory_section, title_memory_secti
 #[cfg(windows)]
 pub use watch::{
     kernel_writing, title_memory_allocated, title_memory_freed, title_memory_reading, title_memory_remapped,
-    title_memory_remapping, title_memory_splitting, title_memory_unmapping, title_memory_written,
+    Remapping, title_memory_remapping, title_memory_remapping_in, remap_notes_take, title_memory_splitting, title_memory_unmapping, title_memory_written,
     writing as kernel_will_write,
 };
