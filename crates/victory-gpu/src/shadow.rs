@@ -5149,12 +5149,21 @@ impl Shadow {
             sent.near(fetched_after, at, at + n, &mut skip);
             skip
         };
-        title.clear();
-        title.resize(n, 0);
+        let whole = [(at, at + n)];
+        let uncovered = (!skip.is_empty()).then(|| outside(at, at + n, skip));
+        let ranges = uncovered.as_deref().unwrap_or(&whole);
+        if ranges.is_empty() {
+            return 0;
+        }
+        // fxceless#1350: reuse scratch buffer; skip fully superseded reads.
+        if title.len() < n {
+            title.resize(n, 0);
+        }
+        let title = &mut title[..n];
         let mapped = crate::host::read_into((start + at) as *const u8, title);
-        let was = title.clone();
+        let was = title.to_vec();
         let mut changed = false;
-        for (a, b) in outside(at, at + n, skip) {
+        for &(a, b) in ranges {
             let (a, b) = (a - at, b - at);
             // Title memory that is not mapped: the CPU's side keeps what
             // the card wrote, as before; `title` is scratch then.

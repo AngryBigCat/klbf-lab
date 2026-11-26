@@ -1543,7 +1543,15 @@ fn dynamic_slots(count: u32, null: u32) -> u32 {
         return if null == 0 { slots.clamp(DYNAMIC, 1 << 21) } else { slots.clamp(DYNAMIC, (null / 2).max(DYNAMIC)) };
     }
     if null < PORTABLE_VIEWS {
-        return DYNAMIC;
+        static CAPPED: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+        return *CAPPED.get_or_init(|| {
+            let asked = std::env::var("VICTORY_DYNAMIC_SLOTS").ok().and_then(|v| v.trim().parse::<u32>().ok());
+            let slots = asked.unwrap_or(DYNAMIC).clamp(DYNAMIC, (null / 2).max(DYNAMIC));
+            if slots != DYNAMIC {
+                tracing::warn!(slots, title_in_place = null - slots, "dynamic descriptor slots on a capped view heap");
+            }
+            slots
+        });
     }
     null.saturating_sub(count).min(most).max(DYNAMIC)
 }

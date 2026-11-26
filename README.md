@@ -1,3 +1,46 @@
+# victory-scarlett-3070 (8 GB NVIDIA / RTX 3070 Fork)
+
+A fork of [Op-lite/victory-scarlett](https://github.com/Op-lite/victory-scarlett) (itself based on
+[fxceless/victory-fork](https://github.com/fxceless/victory-fork) and [Marvisak/VIctory](https://github.com/Marvisak/VIctory))
+tuned for **8 GB NVIDIA GPUs** (tested on an RTX 3070 8 GB, 32 GB RAM, Windows 11). The upstream
+`victory-scarlett` README follows below.
+
+**This repository contains no game files, code, or assets.** You need your own copy of the title.
+It is not affiliated with or endorsed by the title's developer or publisher. Licensed GPL-3.0-or-later.
+
+## What's Added on Top of `Op-lite/victory-scarlett` (`835ca60`)
+
+- **8 GB VRAM & NVIDIA stability:**
+  - `VICTORY_TEXTURE_MIP_DROP=1` (`resource.rs`) — drops top mip levels of large placed textures (~75% less texture VRAM).
+  - Immediate idle VRAM eviction (`fxceless#1269`, `draw.rs`).
+  - NVIDIA 1M descriptor-heap cap fix (`VICTORY_DYNAMIC_SLOTS=524288`, `descriptor/host.rs`).
+  - Prelude allocator cap & recycling (`VICTORY_MAX_PRELUDES=32`, `host.rs`).
+  - Shadow scratch buffer reuse (`fxceless#1350`, `shadow.rs`).
+  - `TITLE_PAGES` working-set reporting (`xmem.rs`).
+- **Visual fixes:**
+  - `R9G9B9E5` -> `R11G11B10_FLOAT` format stand-in (`resource.rs`, fixes purple/violet lighting & vegetation).
+  - Ambient leftover state fix (`ambient.rs`).
+  - Integer render-target unblending (`fxceless#501`, `pipeline.rs`, `pipeline/host.rs`).
+  - `VICTORY_SKIP_PIPELINES='02384a60fda6f2d0,731a39171b568298'` in `scripts/play-3070.ps1` (skips broken water/heat-haze blocks and decal-heap defrag).
+- **Performance & pacing:**
+  - 60 FPS frame-interval unlock (`VICTORY_FRAME_INTERVAL_MS=16.667`, `frame_rate.rs`, `frame.rs`, `run.rs`).
+  - Async stderr logging (`victory-core/src/logging.rs`).
+  - Dedicated RTX 3070 8 GB launcher (`scripts/play-3070.ps1`, preserves default `%LOCALAPPDATA%\victory` saves & cache).
+
+## Build and Run
+
+```powershell
+cargo build --release --locked -p victory
+
+# First run (if you don't have a shader cache yet):
+.\scripts\play-3070.ps1 -Game 'C:\path\to\game_scarlett_master.exe' -Prewarm
+
+# Normal runs:
+.\scripts\play-3070.ps1 -Game 'C:\path\to\game_scarlett_master.exe'
+```
+
+---
+
 # Scarlett fork (branch `scarlett-fox`), state of 2026-11-26
 
 ## How to start the game (the short version)

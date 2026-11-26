@@ -1218,6 +1218,38 @@ fn heap_spread() -> bool {
     *ON.get_or_init(|| std::env::var_os("VICTORY_HEAP_SPREAD").is_none_or(|v| v != "0"))
 }
 
+fn heap_parts() -> u64 {
+    static PARTS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *PARTS.get_or_init(|| {
+        std::env::var("VICTORY_HEAP_PARTS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|&n| n >= 1)
+            .map(|n| n.min(u32::MAX as u64))
+            .unwrap_or(HEAP_ROUND)
+    })
+}
+
+fn changed_limit() -> usize {
+    static LIMIT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *LIMIT.get_or_init(|| {
+        std::env::var("VICTORY_HEAP_CHANGED_MAX")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(4096)
+    })
+}
+
+fn pass_limit() -> usize {
+    static LIMIT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *LIMIT.get_or_init(|| {
+        std::env::var("VICTORY_HEAP_PASS_MAX")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(2048)
+    })
+}
+
 /// The host copy and range the buffer view of each of a heap's slots reads
 /// ([`State::heap_buffers`]), by slot.
 #[derive(Default)]
@@ -1229,11 +1261,18 @@ pub(crate) struct BufferSweep {
     ranges: HeapRanges<std::sync::Arc<crate::shadow::Shadow>>,
     // Last refresh frame and covered interval for throttled, unwatched copies.
     unwatched: std::collections::HashMap<u64, (u64, u64, u64)>,
+    // Written slots a pass did not get to, for the next one.
+    pending: Vec<u32>,
 }
 
 impl Default for BufferSweep {
     fn default() -> Self {
-        Self { passes: 0, ranges: HeapRanges(Vec::new()), unwatched: Default::default() }
+        Self {
+            passes: 0,
+            ranges: HeapRanges(Vec::new()),
+            unwatched: Default::default(),
+            pending: Vec::new(),
+        }
     }
 }
 
@@ -1479,18 +1518,38 @@ fn heap_buffer_pass(heap: &crate::descriptor::Heap, host: &crate::descriptor::ho
     // released resource goes stale without a write, and a slot written
     // before its memory had a host copy is only made then.
     let mut kept = host.buffer_sweep.lock().unwrap_or_else(|e| e.into_inner());
-    let BufferSweep { passes, ranges, unwatched } = &mut *kept;
+    let spread = heap_spread();
+    let parts = heap_parts();
     let changed = host.buffer_changes();
-    let all = *passes == 0 || (*passes % HEAP_ROUND == 0 && !heap_spread());
+    let changed = if spread {
+        let pending = &mut kept.pending;
+        pending.extend(changed);
+        pending.sort_unstable();
+        pending.dedup();
+        let limit = changed_limit();
+        let take = if limit == 0 { pending.len() } else { pending.len().min(limit) };
+        pending.drain(..take).collect()
+    } else {
+        changed
+    };
+    let BufferSweep { passes, ranges, unwatched, pending, .. } = &mut *kept;
+    let all = !spread && (*passes == 0 || *passes % parts == 0);
     let slots = if all {
         ranges.0.clear();
         host.buffer_slots()
-    } else if heap_spread() {
+    } else if spread {
         // The written ones, and this pass's part of the others.
-        let (part, parts) = ((*passes % HEAP_ROUND) as u32, HEAP_ROUND as u32);
-        ranges.forget_part(part, parts);
-        let mut slots = host.buffer_slots_of(part, parts);
+        let (part, parts_u32) = ((*passes % parts) as u32, parts as u32);
+        ranges.forget_part(part, parts_u32);
+        let mut slots = host.buffer_slots_of(part, parts_u32);
         slots.extend(changed);
+        let limit = pass_limit();
+        if limit > 0 && slots.len() > limit {
+            let deferred = slots.split_off(limit);
+            pending.extend(deferred);
+            pending.sort_unstable();
+            pending.dedup();
+        }
         slots
     } else {
         changed
@@ -3565,6 +3624,13 @@ impl State {
         // returned here, and a slot whose texture had been streamed out
         // kept its host copy for as long as the card was full).
         let mut room = crate::resource::room(memory);
+        if !room {
+            // fxceless#1269: give idle textures and host copies one immediate
+            // chance to leave before refusing new texture slots.
+            crate::shadow::let_go_idle();
+            crate::resource::let_go_idle();
+            room = crate::resource::room(crate::host::host().and_then(|h| h.video_memory()));
+        }
         // Bytes uploaded by this pass since the card was last asked
         // whether it has room: asked again every 32 MiB (a pass may upload
         // 192 MB and more, and one asking a pass let the queue run some
