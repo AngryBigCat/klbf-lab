@@ -46,6 +46,7 @@ pub(crate) fn round_coverage(x: f32, y: f32, w: f32, h: f32, r: f32) -> f32 {
 }
 
 /// Blends the premultiplied `bm` onto 8-bit RGB rows `rgb` (`w` x `h`) with its corner at (x0, y0).
+#[allow(dead_code)] // (the overlay of our tree uses it; not this tree)
 pub(crate) fn blend_onto_rgb(rgb: &mut [u8], w: usize, h: usize, bm: &Bitmap, x0: usize, y0: usize) {
     for y in 0..bm.h.min(h.saturating_sub(y0)) {
         for x in 0..bm.w.min(w.saturating_sub(x0)) {
