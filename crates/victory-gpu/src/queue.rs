@@ -1106,10 +1106,35 @@ fn show_planes(
         return;
     };
     let shown = host.present_planes(texture, state, overlay, what.frame);
+    klbf_bench_present(shown.unwrap_or(false));
     #[cfg(feature = "diagnostics")]
     blinks(what.frame, what.resource as This, state, shown);
     #[cfg(not(feature = "diagnostics"))]
     let _ = (shown, what.resource);
+}
+
+/// KLBF Lab Bench: hands each present to the bench, with its world frame (0 on menus and
+/// loading screens, 1 on the first frame with 500 draws or more, then +1 per present; PR #78 by
+/// Vladimir-Human in PastiiJay/klbf-lab).
+#[cfg(windows)]
+fn klbf_bench_present(black: bool) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static LAST_DRAWN: AtomicU64 = AtomicU64::new(0);
+    static WORLD_FRAME: AtomicU64 = AtomicU64::new(0);
+    if !crate::klbf_bench::active() {
+        return;
+    }
+    let drawn = crate::draw::drawn();
+    let prev = LAST_DRAWN.swap(drawn, Ordering::Relaxed);
+    let wf = match WORLD_FRAME.load(Ordering::Relaxed) {
+        0 if drawn.saturating_sub(prev) >= 500 => {
+            WORLD_FRAME.store(1, Ordering::Relaxed);
+            1
+        }
+        0 => 0,
+        _ => WORLD_FRAME.fetch_add(1, Ordering::Relaxed) + 1,
+    };
+    crate::klbf_bench::on_present(black, wf);
 }
 
 /// Diagnostics: logs a presented frame that is black after one that was

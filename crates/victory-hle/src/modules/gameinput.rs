@@ -1593,6 +1593,10 @@ mod host {
                 return None;
             }
             self.empty_until[slot] = None;
+            // KLBF Lab Bench: the input is locked during the run.
+            if victory_gpu::klbf_bench::input_locked() {
+                return Some(PadState::default());
+            }
             #[allow(unused_mut)]
             let mut pad = convert(&state.Gamepad);
             // The scripted keys (`VICTORY_KEYS`) also press the first
@@ -1615,6 +1619,10 @@ mod host {
         }
 
         fn keys(&mut self) -> Vec<KeyState> {
+            // KLBF Lab Bench: the input is locked during the run.
+            if victory_gpu::klbf_bench::input_locked() {
+                return Vec::new();
+            }
             let mut down = scripted();
             if focused() {
                 // Left/right modifier keys only, as devices report them; no

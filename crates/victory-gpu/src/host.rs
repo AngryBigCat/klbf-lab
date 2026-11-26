@@ -9567,7 +9567,10 @@ impl Meter {
         // presenting never waits; it takes the newest text when free.
         static PENDING: Mutex<Option<(usize, Vec<u16>)>> = Mutex::new(None);
         static SETTER: std::sync::Once = std::sync::Once::new();
-        *PENDING.lock().unwrap_or_else(|e| e.into_inner()) = Some((hwnd.0 as usize, text));
+        // KLBF Lab Bench: a run owns the title meanwhile (no figures during it).
+        if !crate::klbf_bench::holds_title() {
+            *PENDING.lock().unwrap_or_else(|e| e.into_inner()) = Some((hwnd.0 as usize, text));
+        }
         SETTER.call_once(|| {
             let _ = std::thread::Builder::new()
                 .name("victory-caption".into())
@@ -9921,6 +9924,7 @@ impl Host {
             let copy = self.new_list()?;
             copy.close();
             tracing::info!(width, height, format = format.0, "presenting to a window");
+            crate::klbf_bench::start(hwnd, self.adapter.clone()); // KLBF Lab Bench
             self.log_video_memory("right after the swap chain is made");
             Ok(Presenter {
                 swap_chain,

@@ -238,6 +238,8 @@ fn hook(hwnd: HWND) {
         wm::SetPropW(hwnd, TITLE_PROC, title as *mut c_void);
         wm::SetWindowLongPtrW(hwnd, wm::GWLP_WNDPROC, window_proc as *const () as isize);
     }
+    // KLBF Lab Bench: the card's close ends the title the same way.
+    victory_gpu::klbf_bench::on_exit(|| end_title("bench finished", Box::new(|| {})));
 }
 
 extern "system" fn window_proc(
@@ -249,6 +251,7 @@ extern "system" fn window_proc(
     // A user close (close button, Alt+F4, window or taskbar menu); a
     // console title never sees one, nor a WM_CLOSE from it.
     if message == wm::WM_SYSCOMMAND && wparam & 0xFFF0 == wm::SC_CLOSE as usize {
+        victory_gpu::klbf_bench::window_closed();
         end_title("window closed", Box::new(|| {}));
         return 0;
     }

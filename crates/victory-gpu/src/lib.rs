@@ -17,6 +17,10 @@
 
 #[cfg(windows)]
 mod ambient;
+#[cfg(windows)]
+pub mod klbf_bench; // KLBF Lab Bench BM-v1 (PastiiJay/klbf-lab)
+#[cfg(windows)]
+mod pixels; // KLBF Lab Bench card pixels (from Neptune)
 #[cfg(all(windows, feature = "diagnostics"))]
 mod capture;
 #[cfg(windows)]
