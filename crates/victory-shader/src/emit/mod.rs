@@ -1450,6 +1450,20 @@ mod tests {
     use super::lower::LOOP_LIMIT;
     use super::parse_loop_limit;
 
+    /// (PastiiJay/klbf-lab #113, Adiker) `VICTORY_HALF_VIEWS` is in the shader cache key, so =0
+    /// and the default never share a cached shader.
+    #[test]
+    fn half_view_setting_is_part_of_the_shader_cache_fingerprint() {
+        let name = "VICTORY_HALF_VIEWS";
+        assert!(env!("VICTORY_SHADER_SWITCHES").split(',').any(|switch| switch == name));
+        let mut entry = format!("{name}=").into_bytes();
+        if let Some(value) = std::env::var_os(name) {
+            entry.extend_from_slice(value.as_encoded_bytes());
+        }
+        entry.push(0);
+        assert!(super::translation_fingerprint().windows(entry.len()).any(|part| part == entry));
+    }
+
     /// The LLVM text `dxc -dumpbin` prints for a DXIL container, when dxc
     /// is installed.
     #[cfg(windows)]

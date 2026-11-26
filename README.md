@@ -244,6 +244,8 @@ In short; the reasons and the measurements are in [docs/findings.md](docs/findin
 
 CREDITS: KLBF Lab build (PastiiJay/klbf-lab). Based on Op-lite/victory-scarlett (itself on codec-d/cool_fox).
 Start it with `play.ps1` (KLBF Lab's cache and saves in `%LOCALAPPDATA%\klbf-lab`); `scripts/play-scarlett.ps1` is unchanged.
+If faces distort, set `VICTORY_HALF_VIEWS=0` before `play.ps1` (kept by it) for the older float path of 16-bit views
+(PastiiJay/klbf-lab #113, Adiker); the default is unchanged, and the shader cache keeps the two apart.
 
 This is a tree of other people's work with more on top. The history is kept, and
 commits taken from elsewhere name the commit and its author.

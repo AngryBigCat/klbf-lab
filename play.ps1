@@ -47,8 +47,9 @@ if (-not $Cache) { $Cache = Join-Path $env:LOCALAPPDATA 'klbf-lab\cache' }
 if (-not $Data) { $Data = Join-Path $env:LOCALAPPDATA 'klbf-lab\data' }
 New-Item -ItemType Directory -Force -Path $Cache, $Data | Out-Null
 
-# Settings left in this window by an earlier start go: only what is below counts.
-Get-ChildItem Env: | Where-Object { $_.Name -like 'VICTORY_*' } | ForEach-Object { Remove-Item "Env:$($_.Name)" }
+# Settings left in this window by an earlier start go: only what is below counts. VICTORY_HALF_VIEWS=0 stays
+# (PastiiJay/klbf-lab #113, Adiker: the older float path for 16-bit views, if faces distort).
+Get-ChildItem Env: | Where-Object { $_.Name -like 'VICTORY_*' -and $_.Name -ne 'VICTORY_HALF_VIEWS' } | ForEach-Object { Remove-Item "Env:$($_.Name)" }
 
 $set = [ordered]@{
     VICTORY_GAME_DIR  = $Game
