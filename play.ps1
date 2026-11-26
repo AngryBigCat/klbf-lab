@@ -12,6 +12,8 @@
 # -Data        saves (default: %LOCALAPPDATA%\klbf-lab\data)
 # -RayTracing  the title's own ray tracing (VICTORY_BVH_BUILDER=1): better light, much slower. Off by default.
 # -AutoStart   presses through the start screens by itself, for a fresh start with no save
+# -SkipMovies  skips the opening movies (off by default): all or open (none opens), end (each jumps to its
+#              last frame), fast (decoded without waiting). VICTORY_SKIP_MOVIES, by zocram4cc.
 # -NoHooks     without the memory hooks: the first thing to try if something looks wrong
 # -More        other settings, last word: -More @{ VICTORY_LOG = 'warn' }
 #
@@ -24,6 +26,7 @@ param(
     [string]$Data = '',
     [switch]$RayTracing,
     [switch]$AutoStart,
+    [ValidateSet('open', 'end', 'fast', 'all')][string]$SkipMovies = '',
     [switch]$NoHooks,
     [hashtable]$More = @{}
 )
@@ -87,6 +90,7 @@ if ($RayTracing) { $set.VICTORY_BVH_BUILDER = '1' }
 if ($AutoStart) {
     $set.VICTORY_AUTO_INPUT = 'd>=15,rep(A,1,d<10),w3,d>=20,w1,rep(A,1,d>=35),w1.5,Down,w7,Down,w0.6,A,w1.5,A,w0.7,Down,w0.5,A,w0.7,Down,w0.5,A'
 }
+if ($SkipMovies) { $set.VICTORY_SKIP_MOVIES = $(if ($SkipMovies -eq 'all') { 'open' } else { $SkipMovies }) }
 foreach ($k in $More.Keys) { $set[$k] = [string]$More[$k] }
 foreach ($k in $set.Keys) { Set-Item -Path "Env:$k" -Value $set[$k] }
 

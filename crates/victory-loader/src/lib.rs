@@ -26,6 +26,7 @@ pub mod callhook;
 #[cfg(windows)]
 mod console_insn;
 mod crash;
+mod movies;
 pub mod prepare;
 pub(crate) mod publish;
 pub mod resolution;
