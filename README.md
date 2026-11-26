@@ -24,9 +24,7 @@ This is the one version we recommend. It is meant for every graphics card; so fa
 > **🧪🌴 New: KLBF Lab Bench · Bayside Morning v1.** A 5-minute hands-off test from the same spot for everyone, input locked, with a certified postcard at the end. [How to run it](docs/klbf/BENCH-BM-V1.md) · [Results by hardware](docs/klbf/BAYSIDE-MORNING-V1.md). Lab 63 also fixes dark faces in shade and skips the intro movie on request.
 >
 > <!-- latest-run-start -->
-> **Latest run:** 2026-11-26 · [vShotv](https://github.com/vShotv) · [PastiiJay/klbf-lab@bedecd6](https://github.com/PastiiJay/klbf-lab/tree/bedecd6) · NVIDIA GeForce RTX 4070 / AMD Ryzen 5 7600 6-Core Processor · 8.3 fps avg (median 8.9, 1 % low 2.4) · profile X, none · [card](https://github.com/user-attachments/assets/f3299aa6-89af-46b1-91a2-b7288f44b22f) · [JSON](docs/klbf/bench/bm-v1/KLBF-Bench-BM-v1-20261126-2011-eb51f9b4.json)
->
-> <a href="https://github.com/user-attachments/assets/f3299aa6-89af-46b1-91a2-b7288f44b22f"><img src="https://github.com/user-attachments/assets/f3299aa6-89af-46b1-91a2-b7288f44b22f" width="560" alt="KLBF Lab Bench card"></a>
+> **Latest run:** 2026-11-26 · new **AMD beta** ([`beta-amd`](https://github.com/PastiiJay/klbf-lab/tree/beta-amd)), Series X, sea fixed · Radeon RX 9070 XT / Ryzen 7 9800X3D · 16.3 fps avg (1 % low 6.2, 4 freezes) · card added after tonight's final run
 > <!-- latest-run-end -->
 
 > **📏 A shared frame-rate standard.** Numbers between projects cannot be compared today (empty seas, menus, one lucky second). We propose one method for everyone: same starting save, same route, three tables (frame rate seen in the world, stability index, average performance index). **[Read the method](docs/klbf/MEASUREMENT.md)**, use it, and post your numbers.
