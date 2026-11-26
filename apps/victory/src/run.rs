@@ -194,6 +194,10 @@ pub fn run(
     // SAFETY: the mapped title image, none of whose code has run yet.
     #[cfg(windows)]
     unsafe { victory_hle::readback::install(image.base()) };
+    // (Coder H, F23) `VICTORY_LOCK_METER`: after the read-back hooks (they own the unlock with VICTORY_READBACK_LOCKS=1).
+    // SAFETY: as above.
+    #[cfg(windows)]
+    unsafe { victory_hle::lockhook::install(image.base()) };
     // SAFETY: imports are bound; from here on we run title code.
     let main = unsafe { Arc::new(image).spawn_main(dlls)? };
     let code = main
