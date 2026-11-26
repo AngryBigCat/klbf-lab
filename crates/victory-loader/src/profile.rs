@@ -75,7 +75,7 @@ pub fn profile_on_schedule(phase: fn() -> u32) {
 
 fn profile((from, to, every, file): (Duration, Duration, Duration, String), start: Instant, phase: fn() -> u32) {
     std::thread::sleep(from.saturating_sub(start.elapsed()));
-    eprintln!("VIctory: the profile begins");
+    eprintln!("KLBF Lab: the profile begins");
     let mut threads: HashMap<u32, Thread> = HashMap::new();
     let mut chosen: Vec<u32> = Vec::new();
     let mut counts: HashMap<(u32, u32, Vec<u64>), u64> = HashMap::new();
@@ -104,9 +104,9 @@ fn profile((from, to, every, file): (Duration, Duration, Duration, String), star
     }
     choose(&mut threads, &mut chosen);
     if let Err(e) = write(&file, &threads, &counts, &phases, rounds) {
-        eprintln!("VIctory: the profile was not written: {e}");
+        eprintln!("KLBF Lab: the profile was not written: {e}");
     } else {
-        eprintln!("VIctory: the profile is in {file}");
+        eprintln!("KLBF Lab: the profile is in {file}");
     }
 }
 

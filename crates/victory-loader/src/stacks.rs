@@ -111,7 +111,7 @@ pub fn set_symbolizer(f: fn(usize) -> Option<String>) {
 /// beforehand (it may hold the heap lock).
 pub fn dump_stacks() {
     let ids = other_threads();
-    eprintln!("VIctory: stacks of {} threads", ids.len());
+    eprintln!("KLBF Lab: stacks of {} threads", ids.len());
     for id in ids {
         // SAFETY: opens a thread of our own process.
         let thread = unsafe {

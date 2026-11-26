@@ -2233,7 +2233,7 @@ fn commit_limit_message(
     info: Option<&PERFORMANCE_INFORMATION>,
 ) -> String {
     let mut message = format!(
-        "VIctory: Windows commit limit reached while committing {len} bytes of {what}: {error}.\n"
+        "KLBF Lab: Windows commit limit reached while committing {len} bytes of {what}: {error}.\n"
     );
     if let Some(info) = info {
         use std::fmt::Write;

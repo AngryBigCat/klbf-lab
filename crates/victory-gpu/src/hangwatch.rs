@@ -212,9 +212,9 @@ fn watch(n: u64) {
         let line = report(since.elapsed().as_secs_f64(), now);
         tracing::warn!("{line}");
         // Also straight to stderr: a hang may be inside the log's own lock.
-        eprintln!("VIctory: {line}");
+        eprintln!("KLBF Lab: {line}");
         if let Some(dump) = STACKS.get() {
-            eprintln!("VIctory: hang watch: stacks follow");
+            eprintln!("KLBF Lab: hang watch: stacks follow");
             dump();
         }
     }
