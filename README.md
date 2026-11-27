@@ -27,6 +27,11 @@ estimate (cool_fox), write-combining skip, descriptor slot fix (fxceless #1324),
 .\play.ps1 -Game 'D:\Path\To\YourDump'
 ```
 
+- **First start:** the launcher translates all of the title's shaders by itself (a few minutes, once per build).
+  The effects built from them are made while you play and kept, so the first session shows "compiling" now
+  and then; later ones much less.
+- **Before a bench:** play about 10 minutes once on the build, so the effects are already made and do not
+  compile during the run (the card's figures are then comparable).
 - Series X profile by default
 - optional: `-Fsr -FfxDir 'D:\Path\To\FidelityFX\signedbin'` for Series S + FSR 4 (faster)
 - optional: `-SkipMovies end` skips the opening movies
