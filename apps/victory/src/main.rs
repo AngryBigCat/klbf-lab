@@ -5,6 +5,7 @@
 
 mod census;
 mod inspect;
+mod klbf_defaults; // KLBF Lab: the launcher's settings for bare starts
 #[cfg(all(windows, feature = "diagnostics"))]
 mod replay;
 mod run;
@@ -189,6 +190,8 @@ unsafe impl Sync for SdkPath {}
 pub static D3D12SDKPath: SdkPath = SdkPath(b".\\D3D12\\\0".as_ptr());
 
 fn main() -> Result<()> {
+    // (KLBF Lab) Before anything reads a setting or starts a thread.
+    klbf_defaults::apply();
     victory_core::logging::init("info");
     // The audio recorder `run` starts for `VICTORY_AUDIO_CAPTURE`.
     #[cfg(all(windows, feature = "diagnostics"))]
