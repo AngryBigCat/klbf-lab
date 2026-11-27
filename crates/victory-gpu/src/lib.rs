@@ -19,6 +19,8 @@
 mod ambient;
 pub mod external; // KLBF Lab: FSR port (VICTORY_FSR_DLL)
 #[cfg(windows)]
+mod port; // KLBF Lab: renderer port 1 (VICTORY_PORT_CONSTANTS, from rodrion-vi)
+#[cfg(windows)]
 pub mod klbf_bench; // KLBF Lab Bench BM-v1 (PastiiJay/klbf-lab)
 #[cfg(windows)]
 mod pixels; // KLBF Lab Bench card pixels (from Neptune)

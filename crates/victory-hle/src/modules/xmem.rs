@@ -178,6 +178,12 @@ pub extern "system" fn XMemVirtualAlloc(
             );
         }
     }
+    // (KLBF Lab, renderer port 1) 32-bit graphics reservations, so that `VICTORY_PORT_CONSTANTS=1` can
+    // give their fresh pages in address order ([`arrange`]).
+    if !at.is_null() && constrained && kind & MEM_COMMIT == 0 && flags & ADDRESS_32BIT != 0 && port_on() {
+        LOW_RESERVATIONS.lock().unwrap_or_else(|e| e.into_inner()).push((at as usize, size));
+        tracing::info!(at = format_args!("{at:p}"), size, "renderer port 1: 32-bit graphics reservation recorded");
+    }
     if base.is_null() {
         tracing::debug!(
             size,
@@ -1331,6 +1337,103 @@ pub(crate) fn lift_thread() {
 
 /// Maps `n` pages at `address`, in place of what is mapped there; null
 /// `pages` unmaps. Returns `address`, or null if a page or the host fails.
+/// (KLBF Lab, from Paradoxo321/rodrion-vi 5a3d357, after Belobug and gleaf-6 e4a531f)
+/// `VICTORY_PORT_CONSTANTS=1` (default off): renderer port 1. The title maps the pieces of its 32-bit graphics
+/// heap out of order; fresh pages (never committed nor shown) of such a reservation are given the slices of
+/// their section in address order, so the whole heap is one stretch of one section that the GPU side opens in
+/// place (`victory_gpu` `port`).
+fn port_on() -> bool {
+    static ON: LazyLock<bool> = LazyLock::new(|| std::env::var("VICTORY_PORT_CONSTANTS").is_ok_and(|v| v.trim() == "1"));
+    *ON
+}
+
+static LOW_RESERVATIONS: Mutex<Vec<(usize, usize)>> = Mutex::new(Vec::new());
+/// Pages moved, pages left (not fresh).
+static ARRANGED: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+
+/// Under the mapping lock ([`physical`]), before the slices of `pages` are read.
+fn arrange(base: usize, pages: &[usize]) {
+    let Some((first, bytes)) = LOW_RESERVATIONS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .copied()
+        .find(|&(at, len)| at <= base && base.saturating_add(pages.len() * PAGE) <= at + len)
+    else {
+        return;
+    };
+    // The plan from a read of the table; SHOWN is asked with no table lock held.
+    let (section, plan): (Arc<Section>, Vec<(usize, usize, usize)>) = {
+        let table = page_table();
+        let Some(section) = pages.first().and_then(|p| table.pages.get(p)).map(|s| s.section.clone()) else {
+            return;
+        };
+        if section.pages * PAGE < bytes || !pages.iter().all(|p| table.pages.get(p).is_some_and(|s| Arc::ptr_eq(&s.section, &section))) {
+            return;
+        }
+        let plan = pages
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &n)| {
+                let have = table.pages.get(&n)?.index;
+                let want = (base - first) / PAGE + i;
+                (have != want && want < section.pages).then_some((n, have, want))
+            })
+            .collect();
+        (section, plan)
+    };
+    if plan.is_empty() {
+        return;
+    }
+    let committed = |index: usize| section.committed[index / 64].load(Ordering::Relaxed) & (1 << (index % 64)) != 0;
+    let fresh: std::collections::HashSet<usize> = {
+        let shown = SHOWN.read().unwrap_or_else(|e| e.into_inner());
+        plan.iter()
+            .flat_map(|&(_, have, want)| [have, want])
+            .filter(|&index| !committed(index) && shown.at(&Slice { section: section.clone(), index }).is_empty())
+            .collect()
+    };
+    let mut table = page_table_mut();
+    let mut owner: HashMap<usize, usize> =
+        table.pages.iter().filter(|(_, s)| Arc::ptr_eq(&s.section, &section)).map(|(&n, s)| (s.index, n)).collect();
+    let mut moved = 0u64;
+    for (n, have_then, want) in plan {
+        // As read above, else the table changed meanwhile: left as it is.
+        let Some(have) = table.pages.get(&n).map(|s| s.index) else { continue };
+        if have != have_then || !fresh.contains(&have) || !fresh.contains(&want) {
+            ARRANGED[1].fetch_add(1, Ordering::Relaxed);
+            continue;
+        }
+        match owner.get(&want).copied() {
+            Some(other) => {
+                if let Some(slice) = table.pages.get_mut(&other) {
+                    slice.index = have;
+                }
+                owner.insert(have, other);
+            }
+            None => {
+                owner.remove(&have);
+            }
+        }
+        if let Some(slice) = table.pages.get_mut(&n) {
+            slice.index = want;
+        }
+        owner.insert(want, n);
+        moved += 1;
+    }
+    if moved > 0 {
+        let all = ARRANGED[0].fetch_add(moved, Ordering::Relaxed) + moved;
+        tracing::info!(
+            at = format_args!("{base:#x}"),
+            pages = pages.len(),
+            moved,
+            all,
+            not_fresh = ARRANGED[1].load(Ordering::Relaxed),
+            "renderer port 1: 32-bit graphics pages arranged in address order"
+        );
+    }
+}
+
 pub extern "system" fn XMemMapPhysicalPages(
     address: *mut c_void,
     n: usize,
@@ -1381,6 +1484,9 @@ pub extern "system" fn XMemMapPhysicalPages(
     let Some(pages) = pages else {
         return address;
     };
+    if port_on() {
+        arrange(base, &pages);
+    }
     let slices: Vec<Option<Slice>> = {
         let table = page_table();
         pages.iter().map(|page| table.pages.get(page).cloned()).collect()
