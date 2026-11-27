@@ -5527,3 +5527,9 @@ float4 lit() : SV_Target { return 1.0; }
         assert!(more.serial != copy.serial && more.grown.load(std::sync::atomic::Ordering::Relaxed));
     }
 }
+
+/// (KLBF Lab, FSR port) Whether `this` is a live title texture of ours.
+#[cfg(windows)]
+pub(crate) fn is_texture(this: This) -> bool {
+    textures().contains(&(this as usize))
+}

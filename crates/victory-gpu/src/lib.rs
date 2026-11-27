@@ -17,6 +17,7 @@
 
 #[cfg(windows)]
 mod ambient;
+pub mod external; // KLBF Lab: FSR port (VICTORY_FSR_DLL)
 #[cfg(windows)]
 pub mod klbf_bench; // KLBF Lab Bench BM-v1 (PastiiJay/klbf-lab)
 #[cfg(windows)]
