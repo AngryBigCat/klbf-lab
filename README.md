@@ -1,15 +1,21 @@
 # KLBF Lab — AMD beta (branch `beta-amd`)
 
-**Beta.** Based on [Op-lite/victory-scarlett](https://github.com/Op-lite/victory-scarlett) (itself on
-codec-d/cool_fox), plus our changes:
+**Beta v11 (2026-11-27).** Based on [Op-lite/victory-scarlett](https://github.com/Op-lite/victory-scarlett) (itself on
+codec-d/cool_fox), plus our changes.
 
-- AMD shader-compiler crash fix (fxceless #1213)
-- foliage fix (Ryuki)
-- optional ambient estimate (cool_fox), off by default
-- write-combining skip
-- descriptor slot fix (fxceless #1324)
-- bench BM-v1
-- window branding
+New in v11:
+
+- Op-lite's latest work merged (`835ca60`, `bc264a4`: freeze fix, static-sampler pipelines, launcher defaults)
+- [Yaekai/victory-scarlett-3070](https://github.com/Yaekai/victory-scarlett-3070) merged (VRAM eviction, heap cap, visual fixes)
+- renderer port 1, ported from [Paradoxo321/rodrion-vi](https://github.com/Paradoxo321/rodrion-vi) (after Belobug and
+  gleaf-6): the title's 32-bit graphics heap is read by the card in place, so half the copies per frame are gone
+- FSR 4 in Series S mode: `-Fsr` (the title's FidelityFX calls go to the PC FidelityFX 2.4 DLLs)
+- DirectX 12 Agility SDK 1.620 (`D3D12\` beside the exe) and GPU upload heaps (`VICTORY_WINDOWS_BAR_MB=1024`): less RAM
+- the launcher's settings built into the exe, for launchers that start it bare
+- texture pool index and texture book (off by default, groundwork for less RAM)
+
+Kept from the first beta: AMD shader-compiler crash fix (fxceless #1213), foliage fix (Ryuki), optional ambient
+estimate (cool_fox), write-combining skip, descriptor slot fix (fxceless #1324), bench BM-v1, window branding.
 
 **How to run** (your own dump of the title is needed; nothing of the title is in this repository):
 
@@ -17,15 +23,21 @@ codec-d/cool_fox), plus our changes:
 .\play.ps1 -Game 'D:\Path\To\YourDump'
 ```
 
+- Series X profile by default
+- optional: `-Fsr -FfxDir 'D:\Path\To\FidelityFX\signedbin'` for Series S + FSR 4 (faster)
 - optional: `-SkipMovies end` skips the opening movies
 - optional: `$env:KLBF_AMBIENT_EST='1'` before starting, for brighter shade
-- Series X profile by default
+- optional: `-Bench` runs the 5-minute BM-v1 bench
 
 **Known issues:** green boats and vehicles, semi-transparent foliage in places, distance-dependent shadow
-flicker, late pop-in.
+flicker, late pop-in. Plan on 32 GB of RAM (about 18 GB used at peak).
 
-**Measured** (BM-v1, self-measured, RX 9070 XT + Ryzen 7 9800X3D, Series X profile): 16.3 fps average,
-1 % low 6.2 fps, 4 freezes > 200 ms, 93.9 % of the time at 12 fps or more.
+**Measured** (self-measured, RX 9070 XT + Ryzen 7 9800X3D, 32 GB):
+
+- v11, Series S + FSR 4: 60 min in the world without a crash (scripted input, ended by us at 60 min), peak working
+  set 17.8 GB; BM-v1 run and a real play session to come
+- first beta (v5), BM-v1, Series X profile: 16.3 fps average, 1 % low 6.2 fps, 4 freezes > 200 ms, 93.9 % of the
+  time at 12 fps or more
 
 All upstream credits and the licence below are kept unchanged.
 
