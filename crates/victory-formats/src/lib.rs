@@ -7,4 +7,5 @@
 
 pub mod bcpack;
 pub mod texture;
+pub mod ttpf;
 pub mod xma;

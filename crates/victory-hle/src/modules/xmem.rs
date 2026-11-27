@@ -1048,6 +1048,7 @@ pub(crate) fn pages_written(pages: &[usize], offset: usize, len: usize) {
     if len == 0 {
         return;
     }
+    tex_trim::start();
     for (at, bytes) in shown_at(pages, offset, len) {
         if stream_notice() {
             victory_gpu::kernel_will_write(at, bytes);
@@ -2485,7 +2486,7 @@ mod pool_discard {
         if mb == 0 { u64::MAX } else { mb << 20 }
     }
 
-    fn free_ram() -> Option<u64> {
+    pub(super) fn free_ram() -> Option<u64> {
         use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
         // SAFETY: plain data the call fills in.
         let mut m: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
@@ -2734,6 +2735,109 @@ extern "system" fn title_virtual_free(address: *mut c_void, size: usize, kind: u
     }
     // SAFETY: the title's own arguments.
     unsafe { VirtualFree(address, size, kind) }
+}
+
+/// (Plan GPU 3a) `KLBF_TEX_TRIM=1` (default off): pool pages that hold a texture whose host copy is alive on
+/// the card, and that the title keeps GPU-only (its CPU never reads them), are taken out of the working set in
+/// every view of ours and the title's (`VirtualUnlock` on pages not locked: no byte is lost, Windows writes them
+/// to the page file and brings them back by itself if our layer reads them again to make a copy anew). Only
+/// while free RAM is under `KLBF_TEX_TRIM_BELOW_MB` (6144; 0: always); every 5 s; a copy once while it lives.
+/// Line every 30 s: "texture trim: ...". Needs the page kinds (`VICTORY_GPU_ONLY=1` or `VICTORY_PAGE_KINDS=1`).
+mod tex_trim {
+    use std::collections::HashSet;
+    use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    use std::time::{Duration, Instant};
+
+    use super::PAGE;
+
+    /// Pages taken out (each view counted once per page), copies looked at, passes held by free RAM.
+    static COUNTS: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
+
+    fn on() -> bool {
+        static ON: OnceLock<bool> = OnceLock::new();
+        *ON.get_or_init(|| {
+            let on = std::env::var_os("KLBF_TEX_TRIM").is_some_and(|v| v == "1");
+            tracing::info!(on, "KLBF_TEX_TRIM: GPU-only pool pages of textures already on the card are taken out of RAM (no byte lost) while free RAM is short");
+            on
+        })
+    }
+
+    fn below() -> u64 {
+        static MB: OnceLock<u64> = OnceLock::new();
+        let mb = *MB.get_or_init(|| std::env::var("KLBF_TEX_TRIM_BELOW_MB").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(6144));
+        if mb == 0 { u64::MAX } else { mb << 20 }
+    }
+
+    /// Starts the pass once, if on (called on DirectStorage writes).
+    pub(super) fn start() {
+        static STARTED: std::sync::Once = std::sync::Once::new();
+        if on() {
+            STARTED.call_once(|| {
+                let _ = std::thread::Builder::new().name("klbf-tex-trim".into()).spawn(trim_loop);
+            });
+        }
+    }
+
+    fn trim_loop() {
+        use windows_sys::Win32::System::Memory::VirtualUnlock;
+        let mut done: HashSet<u64> = HashSet::new();
+        let mut said = Instant::now();
+        loop {
+            std::thread::sleep(Duration::from_secs(5));
+            if said.elapsed() >= Duration::from_secs(30) {
+                said = Instant::now();
+                tracing::info!(
+                    "texture trim: {} MB of views taken out of RAM since the start, {} copies looked at, {} passes held (free RAM over KLBF_TEX_TRIM_BELOW_MB), free RAM {} MB",
+                    COUNTS[0].load(Relaxed) * PAGE as u64 >> 20,
+                    COUNTS[1].load(Relaxed),
+                    COUNTS[2].load(Relaxed),
+                    super::pool_discard::free_ram().unwrap_or(0) >> 20
+                );
+            }
+            if super::pool_discard::free_ram().is_some_and(|free| free >= below()) {
+                COUNTS[2].fetch_add(1, Relaxed);
+                continue;
+            }
+            let copies = victory_gpu::pagekinds::gpu_only_copies();
+            let alive: HashSet<u64> = copies.iter().map(|c| c.2).collect();
+            done.retain(|s| alive.contains(s));
+            let todo: Vec<(u64, u64, u64)> = copies.into_iter().filter(|c| !done.contains(&c.2)).collect();
+            for piece in todo.chunks(64) {
+                // The addresses under the locks, taken out after: a page mapped elsewhere meanwhile only
+                // leaves RAM too, and comes back when read.
+                let mut at: Vec<usize> = Vec::new();
+                {
+                    let physical = super::physical();
+                    let shown = super::SHOWN.read().unwrap_or_else(|e| e.into_inner());
+                    for &(start, len, serial) in piece {
+                        let (start, end) = (start as usize, (start + len) as usize);
+                        let mut a = start / PAGE * PAGE;
+                        while a < end {
+                            if let Some(slice) = physical.slice_at(a) {
+                                at.extend(shown.at(&slice).into_iter().map(|(v, _)| v));
+                                if let Some(&base) = slice.section.window.get()
+                                    && base != 0
+                                {
+                                    at.push(base + slice.index * PAGE);
+                                }
+                            }
+                            a += PAGE;
+                        }
+                        done.insert(serial);
+                    }
+                }
+                at.sort_unstable();
+                at.dedup();
+                for &v in &at {
+                    // SAFETY: on pages not locked this only takes them out of the working set; their bytes stay.
+                    unsafe { VirtualUnlock(v as *const core::ffi::c_void, PAGE) };
+                }
+                COUNTS[0].fetch_add(at.len() as u64, Relaxed);
+                COUNTS[1].fetch_add(piece.len() as u64, Relaxed);
+            }
+        }
+    }
 }
 
 pub(crate) fn module() -> HleModule {

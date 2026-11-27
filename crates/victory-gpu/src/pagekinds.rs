@@ -265,6 +265,22 @@ pub fn copy_over(at: usize, len: usize) -> Option<u64> {
     }
 }
 
+/// (Plan GPU 3a, `KLBF_TEX_TRIM`) Host copies of placed textures alive whose whole source is on pages the title
+/// keeps GPU-only: title address, title bytes, the copy's serial. The title's CPU never reads those pages; our
+/// layer reads them again only to make a copy anew, and a page taken out of RAM comes back by itself then.
+pub fn gpu_only_copies() -> Vec<(u64, u64, u64)> {
+    #[cfg(windows)]
+    {
+        crate::resource::placed_copies()
+            .into_iter()
+            .filter(|&(at, len, _, _)| len != 0 && query(at as usize, len as usize)[0] == len)
+            .map(|(at, len, serial, _)| (at, len, serial))
+            .collect()
+    }
+    #[cfg(not(windows))]
+    Vec::new()
+}
+
 /// The GPU side's part of the 5 s line; `seconds` since the last one.
 pub fn line(seconds: f64, frames: f64, view: fn(usize) -> u8) -> String {
     let mut out = String::new();
