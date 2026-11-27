@@ -110,6 +110,10 @@ $set = [ordered]@{
     # 0.8 GB less RAM at the same fps
     VICTORY_WINDOWS_BAR_MB = '1024'
 
+    # (KLBF Lab, bench G2 27/11) Renderer port 1: the title's 32-bit graphics heap (its 174 MB ring) read by the
+    # card where the title has it: copies 86 -> 36 MB a frame, +5 % fps
+    VICTORY_PORT_CONSTANTS = '1'
+
     # Picture: the title's character bake waits up to 10 s for its textures (1.5 s by default), and a draw
     # waits up to 500 ms for a pipeline still being made (above) instead of being dropped after 20 ms
     VICTORY_BAKE_TEXTURES_MS = '10000'

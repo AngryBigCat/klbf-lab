@@ -55,6 +55,8 @@ const SET: &[(&str, &str)] = &[
     ("VICTORY_LIST_HOLD", "1"),
     // Windows in the card's memory through the bus (GPU upload heaps; bench E 27/11: 0.8 GB less RAM)
     ("VICTORY_WINDOWS_BAR_MB", "1024"),
+    // Renderer port 1 (bench G2 27/11: copies 86 -> 36 MB a frame, +5 % fps)
+    ("VICTORY_PORT_CONSTANTS", "1"),
     // Picture
     ("VICTORY_BAKE_TEXTURES_MS", "10000"),
     ("VICTORY_PLANE_NOW", "1"),
