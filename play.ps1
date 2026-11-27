@@ -117,6 +117,16 @@ $set = [ordered]@{
     # Picture: the material-class depth plane is current before the title's tiling pass reads it (the base
     # gave it last frame's)
     VICTORY_PLANE_NOW = '1'
+
+    # (Op-lite bc264a4) Freezes: the views of the title's batch page-mapping copies are mapped only when touched
+    VICTORY_SOFT_VIEWS = 'copies'
+
+    # (Op-lite bc264a4) Picture: pipelines with static samplers are made each run, not loaded from the saved library
+    VICTORY_SAMPLERS_MADE = '1'
+
+    # (Op-lite bc264a4) Draw set-up: only the table slots a program can read; texture-queue notes that change
+    # nothing skip its lock
+    VICTORY_TABLE_NAMED_ONLY = '1'; VICTORY_QUEUE_MARKS = '1'
 }
 if ($Hooks -and -not $NoHooks) {
     # The memory hooks

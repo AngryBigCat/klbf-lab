@@ -58,6 +58,11 @@ const SET: &[(&str, &str)] = &[
     // Picture
     ("VICTORY_BAKE_TEXTURES_MS", "10000"),
     ("VICTORY_PLANE_NOW", "1"),
+    // Op-lite bc264a4: freezes, static-sampler pipelines, draw set-up
+    ("VICTORY_SOFT_VIEWS", "copies"),
+    ("VICTORY_SAMPLERS_MADE", "1"),
+    ("VICTORY_TABLE_NAMED_ONLY", "1"),
+    ("VICTORY_QUEUE_MARKS", "1"),
 ];
 
 /// Sets the launcher's settings for a bare start. Call first in `main`, before any thread.
