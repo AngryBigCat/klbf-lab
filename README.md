@@ -31,7 +31,7 @@ estimate (cool_fox), write-combining skip, descriptor slot fix (fxceless #1324),
 - optional: `-Fsr -FfxDir 'D:\Path\To\FidelityFX\signedbin'` for Series S + FSR 4 (faster)
 - optional: `-SkipMovies end` skips the opening movies
 - optional: `$env:KLBF_AMBIENT_EST='1'` before starting, for brighter shade
-- optional: `-Bench` runs the 5-minute BM-v1 bench
+- optional: `-Bench` runs the 5-minute BM-v1 bench; `-Bench -BenchLength 15`, `30` or `60` (Medium, Long, Marathon) runs it longer at the same place. The card shows the time, peak RAM, peak VRAM and how busy the card was; the window title shows FPS, GPU, CPU and memory use live
 
 **Known issues:** green boats and vehicles, some semi-transparent trees, shadows of trees flashing at times, late
 pop-in, shaders still compiling during the first sessions. Plan on 32 GB of RAM.
