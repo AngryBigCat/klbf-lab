@@ -1,0 +1,31 @@
+name: Build Windows x64
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install
+      - name: Build diagnostics
+        run: cargo build --profile diag --locked -p victory --features diagnostics --target x86_64-pc-windows-msvc
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          Copy-Item target/x86_64-pc-windows-msvc/diag/victory.exe dist/
+          Copy-Item play.ps1 dist/
+          $hash = (Get-FileHash dist/victory.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  victory.exe" | Set-Content dist/SHA256SUMS.txt
+          git rev-parse HEAD | Set-Content dist/SOURCE-COMMIT.txt
+          if (Test-Path LICENSE) { Copy-Item LICENSE dist/ }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: victory-windows-x64
+          path: dist/
+          retention-days: 3
+          if-no-files-found: error
