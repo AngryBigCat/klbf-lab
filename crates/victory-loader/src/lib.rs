@@ -27,7 +27,6 @@ pub mod callhook;
 mod console_insn;
 mod crash;
 mod movies;
-pub mod frame_rate;
 pub mod prepare;
 pub(crate) mod publish;
 pub mod resolution;

@@ -129,10 +129,6 @@ fn left_out(family: Option<usize>) -> Option<&'static str> {
         if builder || foliage_fix() {
             return std::env::var_os("VICTORY_ACTIVATE_RAYS").is_some_and(|v| v == "0");
         }
-        // (Fox T) `VICTORY_PROBE_RAYS=1`: made, against empty structures.
-        if victory_shader::emit::probe_rays() {
-            return false;
-        }
         std::env::var_os("VICTORY_ACTIVATE_RAYS").is_none_or(|v| v == "0")
     });
     if skip_activate && family == Some(1) {

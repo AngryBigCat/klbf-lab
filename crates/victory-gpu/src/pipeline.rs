@@ -223,7 +223,7 @@ fn translate(container: &[u8]) -> Result<Translated, String> {
         })
         .map(|p| p.used)
         .unwrap_or_default();
-    let tables = crate::draw::TablePlan::new(&used, &host.root_indexed_views, host.table_reads.as_deref());
+    let tables = crate::draw::TablePlan::new(&used, &host.root_indexed_views);
     Ok(Translated {
         host,
         threads,
@@ -789,8 +789,6 @@ pub(crate) extern "system" fn create_stream(
         };
         at += size;
     }
-    #[cfg(windows)]
-    graphics.integer_targets_unblended();
     hand_out(
         shaders,
         #[cfg(windows)]
@@ -822,7 +820,7 @@ pub(crate) mod host;
 #[cfg(windows)]
 pub mod known;
 #[cfg(windows)]
-pub(crate) mod library;
+mod library;
 #[cfg(windows)]
 mod make;
 

@@ -154,11 +154,6 @@ extern "system" fn open_file(_: Factory, path: *const u16, iid: *const Guid, out
     if stream_log::on() {
         stream_log::line(format_args!("F\t{:x}\t{kept}", file as usize));
     }
-    // (Plan GPU, stage 2) A texture pool: its index, for the book.
-    if book::on() && kept.to_ascii_lowercase().ends_with(".ttpf") {
-        // SAFETY: the object just made; its files live as long as it.
-        book::pool_opened(file as usize, &kept, unsafe { &(*file.cast::<Instance<File>>()).state.files.first });
-    }
     WALLS_FILES.lock().unwrap_or_else(|e| e.into_inner()).push((file as usize, kept));
     put(out, file)
 }
@@ -1478,13 +1473,6 @@ fn execute(request: &Request) -> Result<(), HRESULT> {
     if result.is_ok() && victory_gpu::loadmeter::on() {
         load_read_meter(request);
     }
-    // (Plan GPU, stage 2) What texture and level the pages now hold.
-    if result.is_ok() && book::on() && request.options & PAGE_DESTINATION != 0 && request.options & MEMORY_SOURCE == 0 {
-        let size = if request.options & (ZLIB | BCPACK) == 0 { request.source_size } else { request.destination_size } as usize;
-        let offset = (request.page_offset & 0xffff) as usize;
-        let pages = read_list(request.destination.cast(), offset, size);
-        book::written(request.source as usize, request.offset, &super::xmem::page_keys(&pages, offset, size));
-    }
     // (coder G, VICTORY_PAGE_KINDS) Into GPU-only pages or CPU-visible ones.
     if result.is_ok() && super::pagekinds::on() {
         let size = if request.options & (ZLIB | BCPACK) == 0 { request.source_size } else { request.destination_size } as usize;
@@ -2753,105 +2741,5 @@ mod tests {
         assert_eq!(inflate(&bad_body, &mut out), Err(INVALID_DATA));
         assert_eq!(inflate(&packed, &mut out), Ok(plain.len()));
         assert_eq!(out, plain);
-    }
-}
-
-/// (Plan GPU, stage 2) `KLBF_TEX_BOOK=1` (default off): the texture book. For each pool page a DirectStorage request
-/// filled from a texture pool (`.ttpf`), which texture and which of its levels (chunks) it holds, read from the pool's
-/// own index (`victory_formats::ttpf`, stage 1). Nothing changes in what runs; a line every 30 s: "texture book: ...".
-/// The basis for refilling a page from its pool instead of the page file.
-mod book {
-    use std::collections::{HashMap, HashSet};
-    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
-    use std::sync::{Arc, Mutex, OnceLock};
-
-    use victory_formats::ttpf::Pool;
-
-    pub(super) fn on() -> bool {
-        static ON: OnceLock<bool> = OnceLock::new();
-        *ON.get_or_init(|| {
-            let on = std::env::var_os("KLBF_TEX_BOOK").is_some_and(|v| v == "1");
-            tracing::info!(on, "KLBF_TEX_BOOK: the texture book (which texture and level each pool page holds)");
-            on
-        })
-    }
-
-    /// Pools by our file object: name and index.
-    static POOLS: Mutex<Vec<(usize, Arc<str>, Arc<Pool>)>> = Mutex::new(Vec::new());
-    /// Pool page (section, index) -> (file object, texture, level).
-    static PAGES: OnceLock<Mutex<HashMap<(usize, usize), (usize, u32, u32)>>> = OnceLock::new();
-    /// Requests from pools: matched to a chunk start, not matched.
-    static COUNTS: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
-
-    fn pages() -> std::sync::MutexGuard<'static, HashMap<(usize, usize), (usize, u32, u32)>> {
-        PAGES.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    pub(super) fn pool_opened(file: usize, name: &str, handle: &std::fs::File) {
-        use std::os::windows::fs::FileExt;
-        let mut head = vec![0u8; victory_formats::ttpf::HEAD];
-        let n = handle.seek_read(&mut head, 0).unwrap_or(0);
-        head.truncate(n);
-        match Pool::parse(&head) {
-            Ok(pool) => {
-                tracing::info!(pool = name, textures = pool.textures.len(), chunks = pool.chunks.len(), "texture book: pool index read");
-                POOLS.lock().unwrap_or_else(|e| e.into_inner()).push((file, Arc::from(name), Arc::new(pool)));
-                static LINE: std::sync::Once = std::sync::Once::new();
-                LINE.call_once(|| {
-                    let _ = std::thread::Builder::new().name("klbf-tex-book".into()).spawn(|| loop {
-                        std::thread::sleep(std::time::Duration::from_secs(30));
-                        line();
-                    });
-                });
-            }
-            Err(why) => tracing::warn!(pool = name, why, "texture book: pool index not read"),
-        }
-    }
-
-    pub(super) fn written(file: usize, offset: u64, keys: &[((usize, usize), usize)]) {
-        let pool = {
-            let pools = POOLS.lock().unwrap_or_else(|e| e.into_inner());
-            let Some((_, _, pool)) = pools.iter().find(|p| p.0 == file) else { return };
-            pool.clone()
-        };
-        let Some((texture, level)) = pool.at(offset) else {
-            COUNTS[1].fetch_add(1, Relaxed);
-            return;
-        };
-        COUNTS[0].fetch_add(1, Relaxed);
-        let mut book = pages();
-        for &(key, _) in keys {
-            book.insert(key, (file, texture as u32, level as u32));
-        }
-    }
-
-    fn line() {
-        let (n, textures, by_pool) = {
-            let book = pages();
-            let textures: HashSet<(usize, u32)> = book.values().map(|&(f, t, _)| (f, t)).collect();
-            let mut by_pool: HashMap<usize, u64> = HashMap::new();
-            for &(f, _, _) in book.values() {
-                *by_pool.entry(f).or_default() += 1;
-            }
-            (book.len(), textures.len(), by_pool)
-        };
-        let names: Vec<String> = {
-            let pools = POOLS.lock().unwrap_or_else(|e| e.into_inner());
-            let mut top: Vec<(u64, String)> = by_pool
-                .iter()
-                .map(|(f, n)| (*n, pools.iter().find(|p| p.0 == *f).map_or("?".into(), |p| p.1.rsplit(['\\', '/']).next().unwrap_or("?").to_string())))
-                .collect();
-            top.sort_unstable_by(|a, b| b.0.cmp(&a.0));
-            top.into_iter().take(4).map(|(n, name)| format!("{name} {} MB", n * 64 / 1024)).collect()
-        };
-        tracing::info!(
-            "texture book: {} pool pages ({} MB) hold levels of {} textures; requests matched to a level {}, not matched {}; most: {}",
-            n,
-            n as u64 * 64 / 1024,
-            textures,
-            COUNTS[0].load(Relaxed),
-            COUNTS[1].load(Relaxed),
-            names.join(", ")
-        );
     }
 }

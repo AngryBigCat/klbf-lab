@@ -132,7 +132,7 @@ pub use PAIRED_BEFORE_WIDE as WAVE_PAIRED_BEFORE_WIDE;
 pub use rect::rect_list_gs;
 pub use shader::{
     MEMORY_FAULTS, MEMORY_PAGES, MEMORY_READ_ONLY, ROOT_CBV_SPACE, SAMPLER_SPACE, SLOT_FAULTS, SLOT_MEMORY, SLOT_STRIDES, SLOT_WALK, WALK_SLOTS,
-    SLOT_STRIDES_COUNT, SLOT_TABLE_STRIDES, USER_DATA_SPACE, VIEW_INTEGER, VIEW_SIGNED, VIEW_STRIDE_BITS, USER_DISPATCH_THREADS_X, USER_NAN_SLOT, USER_BVH_EMPTY, SLOT_NAN, NAN_SLOTS, NAN_ORIGIN_DWORDS, NAN_ORIGINS, USER_MEMORY_BASE, USER_ROOT_ADDRESS, USER_VIEW_ADDRESS, USER_VIEW_BIAS,
+    SLOT_STRIDES_COUNT, SLOT_TABLE_STRIDES, USER_DATA_SPACE, VIEW_INTEGER, VIEW_SIGNED, VIEW_STRIDE_BITS, USER_DISPATCH_THREADS_X, USER_MEMORY_BASE, USER_ROOT_ADDRESS, USER_VIEW_ADDRESS, USER_VIEW_BIAS,
     raw_views, set_raw_views, set_view_heap_limit, view_heap_limit,
 };
 
@@ -210,62 +210,6 @@ pub fn builder_fences() -> bool {
 pub fn bvh_walk() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("VICTORY_BVH_WALK").is_some_and(|v| v == "1"))
-}
-
-/// (Fox T) A program's tag: FNV-1a of its console code, as the inspect tool and
-/// `VICTORY_NAN_ORIGIN` name it.
-pub fn code_tag(code: &[u8]) -> u64 {
-    let mut h = 0xcbf2_9ce4_8422_2325u64;
-    for &b in code {
-        h ^= u64::from(b);
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    h
-}
-
-/// (Fox T, a meter, with `VICTORY_NAN_METER=1`) `VICTORY_NAN_ORIGIN=<tag>[,<tag>...]` (hex, at
-/// most [`NAN_ORIGINS`]): in those programs every float result of a vector ALU instruction
-/// that is NaN counts itself at the instruction's dword in the [`SLOT_NAN`] buffer
-/// (after the programs' counts): the first instruction in the code with a count is where the
-/// NaN is made (from operands that were numbers) or first read (from memory).
-pub fn nan_origin(code: &[u8]) -> Option<u32> {
-    static TAGS: std::sync::OnceLock<Vec<u64>> = std::sync::OnceLock::new();
-    let tags = TAGS.get_or_init(|| {
-        std::env::var("VICTORY_NAN_ORIGIN")
-            .unwrap_or_default()
-            .split(',')
-            .filter_map(|t| u64::from_str_radix(t.trim().trim_start_matches("0x"), 16).ok())
-            .take(NAN_ORIGINS as usize)
-            .collect()
-    });
-    if tags.is_empty() || !nan_meter() {
-        return None;
-    }
-    let tag = code_tag(code);
-    tags.iter().position(|&t| t == tag).map(|i| i as u32)
-}
-
-/// (Fox T) `VICTORY_PROBE_RAYS=1` (default off): with the ray-tracing structure builder off,
-/// the title's screen probes still trace their rays (`CS_ScreenProbes_ActivateRays` runs, so
-/// no probe keeps the stale memory that showed as violet vegetation), and every node test
-/// (`image_bvh_intersect_ray`) answers as against an empty structure, which the host says
-/// with [`USER_BVH_EMPTY`]: a box node's four children are none, a triangle is missed. The
-/// title's traversal then ends at its first node with the miss it computes for a ray that
-/// finds nothing, instead of walking a structure that was never built. Part of the
-/// translation: the shader cache keys on it.
-pub fn probe_rays() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("VICTORY_PROBE_RAYS").is_some_and(|v| v == "1"))
-}
-
-/// (Fox T, a meter) `VICTORY_NAN_METER=1`: every float a program stores through a typed view
-/// (images, typed buffers) or exports to a float colour target is looked at before any guard;
-/// a NaN or an infinity adds 1 to the program's count in the [`SLOT_NAN`] buffer (an atomic
-/// only then). What the program computes is unchanged. Part of the translation: the shader
-/// cache keys on it.
-pub fn nan_meter() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("VICTORY_NAN_METER").is_some_and(|v| v == "1"))
 }
 
 /// (Fox T) `VICTORY_BVH_PAGE_REUSE=1`: the second 64 bytes of a 128-byte box node of a
@@ -486,58 +430,6 @@ pub struct HostShader {
     /// view at these places as the unsigned format of the same layout
     /// (`descriptor::host::half_view`, host part). `VICTORY_HALF_VIEWS=0`: none.
     pub half_views: Vec<(u8, u32)>,
-    /// (Fox T, `VICTORY_TABLE_NAMED_ONLY`) Every descriptor of a table the code can read,
-    /// as (root parameter, descriptor in the table): from every scalar and global access
-    /// whose address traces to a table parameter ([`crate::resource::Resources::scalar`],
-    /// what lowering turns into heap indices), each descriptor the accessed dwords touch;
-    /// `u32::MAX` for a table read at a computed place (any of its descriptors). `None`:
-    /// not known (a shader made here, a spilled user-data table): every descriptor.
-    pub table_reads: Option<Vec<(u8, u32)>>,
-}
-
-/// See [`HostShader::table_reads`].
-pub(crate) fn table_reads(native: &NativeProgram, p: &ir::Program, res: &resource::Resources) -> Option<Vec<(u8, u32)>> {
-    if crate::spill::is_spilled(native) {
-        return None;
-    }
-    let mut out = std::collections::BTreeSet::new();
-    for &(site, a) in &res.scalar {
-        let Some(rp) = native.layout.get(a.param) else { continue };
-        if rp.root != RootType::Table {
-            continue;
-        }
-        if a.dynamic.is_some() || a.offset >= 1 << 24 {
-            out.insert((rp.slot, u32::MAX));
-            continue;
-        }
-        let inst = p.blocks.get(site.0)?.insts.get(site.1)?;
-        let dwords = access_dwords(inst.name());
-        for k in a.offset / 32..=(a.offset + 4 * dwords - 1) / 32 {
-            out.insert((rp.slot, k));
-        }
-    }
-    // A buffer descriptor built around a table's address (none known): any descriptor.
-    for d in &res.descriptors {
-        for leaf in d.source.leaves() {
-            if let resource::Source::Built { address, .. } = leaf
-                && let Some(rp) = native.layout.get(address.param)
-                && rp.root == RootType::Table
-            {
-                out.insert((rp.slot, u32::MAX));
-            }
-        }
-    }
-    Some(out.into_iter().collect())
-}
-
-/// The dwords a memory instruction moves, at most (16 for a name not known).
-fn access_dwords(name: &str) -> u32 {
-    for (suffix, n) in [("x16", 16), ("x8", 8), ("x4", 4), ("x3", 3), ("x2", 2)] {
-        if name.contains(suffix) {
-            return n;
-        }
-    }
-    if name.contains("dword") || name.contains("byte") || name.contains("short") { 1 } else { 16 }
 }
 
 impl HostShader {
@@ -1395,7 +1287,6 @@ fn emit_program(
         root_uavs: l.root_uavs,
         root_indexed_views: res.root_indexed_views.clone(),
         half_views: l.half_views,
-        table_reads: table_reads(native, p, res),
     };
     Ok((shader, wave_size))
 }
@@ -2267,7 +2158,6 @@ mod tests {
             root_uavs: Vec::new(),
             root_indexed_views: Vec::new(),
             half_views: Vec::new(),
-            table_reads: None,
         };
         let file = |var: &str, stage| {
             std::env::var(var).ok().map(|p| super::HostShader {
@@ -2281,7 +2171,6 @@ mod tests {
                 root_uavs: Vec::new(),
                 root_indexed_views: Vec::new(),
                 half_views: Vec::new(),
-                table_reads: None,
             })
         };
         let ps = file("VICTORY_REF_PS", crate::HwStage::Ps).unwrap_or(ps);
@@ -2892,7 +2781,6 @@ mod tests {
             root_uavs: l.root_uavs,
             root_indexed_views: Vec::new(),
             half_views: Vec::new(),
-            table_reads: None,
         };
         let (root, pso) = host.compute_pipeline(&cs).unwrap();
         // Twelve dwords: the loads below run across the view's end.
@@ -3047,7 +2935,6 @@ mod tests {
                 root_uavs: l.root_uavs,
                 root_indexed_views: Vec::new(),
                 half_views: Vec::new(),
-                table_reads: None,
             };
             let (root, pso) = host.compute_pipeline(&cs).unwrap();
             let inputs: Vec<u32> = [
@@ -3613,7 +3500,6 @@ mod barycentric_tests {
             root_uavs: Vec::new(),
             root_indexed_views: Vec::new(),
             half_views: Vec::new(),
-            table_reads: None,
         };
         validate(&vs);
         // One triangle covers an 8x8 target, with attribute values 2, 6, 10.

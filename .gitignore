@@ -79,5 +79,3 @@ Thumbs.db
 
 # The launcher remembers the game folder here (a local path: not for the repository)
 game-folder.txt
-/runs/
-/run.log

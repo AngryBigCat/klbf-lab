@@ -323,54 +323,6 @@ impl GraphicsState {
         }
     }
 
-    /// Blending off for integer render targets (fxceless#501): D3D12 refuses
-    /// pipelines that blend integer targets with `E_INVALIDARG`.
-    pub(crate) fn integer_targets_unblended(&mut self) {
-        let integer = |f: DXGI_FORMAT| {
-            matches!(
-                f,
-                DXGI_FORMAT_R32G32B32A32_UINT
-                    | DXGI_FORMAT_R32G32B32A32_SINT
-                    | DXGI_FORMAT_R32G32B32_UINT
-                    | DXGI_FORMAT_R32G32B32_SINT
-                    | DXGI_FORMAT_R16G16B16A16_UINT
-                    | DXGI_FORMAT_R16G16B16A16_SINT
-                    | DXGI_FORMAT_R32G32_UINT
-                    | DXGI_FORMAT_R32G32_SINT
-                    | DXGI_FORMAT_R10G10B10A2_UINT
-                    | DXGI_FORMAT_R8G8B8A8_UINT
-                    | DXGI_FORMAT_R8G8B8A8_SINT
-                    | DXGI_FORMAT_R16G16_UINT
-                    | DXGI_FORMAT_R16G16_SINT
-                    | DXGI_FORMAT_R32_UINT
-                    | DXGI_FORMAT_R32_SINT
-                    | DXGI_FORMAT_R8G8_UINT
-                    | DXGI_FORMAT_R8G8_SINT
-                    | DXGI_FORMAT_R16_UINT
-                    | DXGI_FORMAT_R16_SINT
-                    | DXGI_FORMAT_R8_UINT
-                    | DXGI_FORMAT_R8_SINT
-            )
-        };
-        let count = (self.targets.NumRenderTargets as usize).min(8);
-        let blended = |s: &Self, i: usize| {
-            let t = if s.blend.IndependentBlendEnable.as_bool() { i } else { 0 };
-            s.blend.RenderTarget[t].BlendEnable.as_bool()
-        };
-        let fix: Vec<usize> = (0..count).filter(|&i| integer(self.targets.RTFormats[i]) && blended(self, i)).collect();
-        if fix.is_empty() {
-            return;
-        }
-        if !self.blend.IndependentBlendEnable.as_bool() {
-            let first = self.blend.RenderTarget[0];
-            self.blend.RenderTarget = [first; 8];
-            self.blend.IndependentBlendEnable = true.into();
-        }
-        for i in fix {
-            self.blend.RenderTarget[i].BlendEnable = false.into();
-        }
-    }
-
     /// Everything the state holds, as text: part of a pipeline's name in
     /// the library and of the key a title pipeline is started early by.
     pub(crate) fn describe(&self) -> String {
@@ -648,9 +600,7 @@ impl HostPipeline {
                     // table of strides, the directory of title memory by
                     // address and its fault notes.
                     let ours = if uav {
-                        slot == victory_shader::emit::SLOT_FAULTS
-                            || slot == victory_shader::emit::SLOT_WALK
-                            || slot == victory_shader::emit::SLOT_NAN
+                        slot == victory_shader::emit::SLOT_FAULTS || slot == victory_shader::emit::SLOT_WALK
                     } else {
                         slot == victory_shader::emit::SLOT_STRIDES
                             || slot == victory_shader::emit::SLOT_TABLE_STRIDES
@@ -728,9 +678,6 @@ impl HostPipeline {
                 return None;
             }
         };
-        // (Fox T, `VICTORY_SAMPLERS_MADE`) Whether it has static samplers
-        // (`library::with_static_samplers`).
-        let _samplers = super::library::with_static_samplers(!samplers.is_empty());
         let code = |i: usize| {
             stages.get(i).and_then(|(s, _)| s.translated()).map_or(
                 D3D12_SHADER_BYTECODE::default(),

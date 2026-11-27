@@ -41,15 +41,10 @@ struct TableGroup {
     indexed: Vec<RootIndexedView>,
     // Descriptor number -> first declaration, matching the bind-time search.
     by_descriptor: Vec<(u32, usize)>,
-    /// (Fox T, `VICTORY_TABLE_NAMED_ONLY`) The descriptors of the table the
-    /// program can read (`HostShader::table_reads`) and those its used-resource
-    /// list names, sorted; `None`: any (read at a computed place, picked by a
-    /// root constant, or not known).
-    named: Option<Vec<u32>>,
 }
 
 impl TablePlan {
-    pub(crate) fn new(used: &[UsedResource], indexed: &[RootIndexedView], reads: Option<&[(u8, u32)]>) -> Self {
+    pub(crate) fn new(used: &[UsedResource], indexed: &[RootIndexedView]) -> Self {
         let mut slots: Vec<_> = used
             .iter()
             .filter(|u| u.root == RootType::Table)
@@ -67,7 +62,6 @@ impl TablePlan {
                 entries: Vec::new(),
                 by_descriptor: Vec::new(),
                 indexed: indexed.iter().filter(|v| v.table_slot == slot).copied().collect(),
-                named: None,
             })
             .collect();
         let mut direct = Vec::new();
@@ -88,18 +82,6 @@ impl TablePlan {
         for group in &mut groups {
             group.by_descriptor.sort_unstable();
             group.by_descriptor.dedup_by_key(|item| item.0);
-            group.named = reads.and_then(|reads| {
-                let mut named: Vec<u32> = group.by_descriptor.iter().map(|d| d.0).collect();
-                for &(_, k) in reads.iter().filter(|r| r.0 == group.slot) {
-                    if k == u32::MAX {
-                        return None;
-                    }
-                    named.push(k);
-                }
-                named.sort_unstable();
-                named.dedup();
-                group.indexed.is_empty().then_some(named)
-            });
         }
         Self { groups, direct }
     }
@@ -636,14 +618,6 @@ fn copy_stands(seen: Seen, handle: u64) -> bool {
     }
 }
 
-/// `VICTORY_TABLE_MEMO_SLOTS=1` (with `VICTORY_TABLE_MEMO`): the memo also for
-/// the slots of tables made afresh (listed views not known ready, views made
-/// from the title's).
-fn table_memo_slots() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    table_memo() != 0 && *ON.get_or_init(|| std::env::var_os("VICTORY_TABLE_MEMO_SLOTS").is_some_and(|v| v == "1"))
-}
-
 /// `VICTORY_TABLE_MEMO`: 0 off (default), 1 on, 2 verify (memo hits are done
 /// whole anyway; any that changed something is counted, which must be none).
 fn table_memo() -> u8 {
@@ -968,227 +942,6 @@ pub(crate) fn list_alias_line(frames: f64) {
     );
 }
 
-/// (Fox T, `VICTORY_PROBE_RAYS`) Binds of programs with node tests that were
-/// told the structures are empty.
-pub(crate) static PROBE_EMPTY: AtomicU64 = AtomicU64::new(0);
-
-/// (Fox T, diagnostics, `VICTORY_LIST_CALLS=1`) New tables against those of
-/// the frame before, all recording threads: tables, slots; tables whose
-/// descriptor records (the records' words: view index and generation) were a
-/// table's of the frame before, and their slots; tables whose views (what the
-/// records describe, whatever their index) were, and their slots; tables at
-/// the same address with as many slots.
-#[cfg(feature = "diagnostics")]
-static CROSS: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
-
-#[cfg(feature = "diagnostics")]
-#[derive(Default)]
-struct CrossFrame {
-    frame: u64,
-    records: [std::collections::HashSet<(u32, u64)>; 2],
-    views: [std::collections::HashSet<(u32, u64)>; 2],
-    places: [std::collections::HashSet<(u64, u32)>; 2],
-}
-
-#[cfg(feature = "diagnostics")]
-static CROSS_SETS: std::sync::Mutex<Option<CrossFrame>> = std::sync::Mutex::new(None);
-
-/// What a view describes, hashed (whatever record holds it).
-#[cfg(feature = "diagnostics")]
-fn view_hash(h: &mut u64, view: Option<&View>) {
-    let Some(view) = view else {
-        mix(h, 0);
-        return;
-    };
-    let words: Vec<u64> = match view {
-        View::Constant(a, s) => vec![1, *a, u64::from(*s)],
-        View::Shader(r, d) => std::iter::once(2).chain([*r as u64]).chain(d.iter().flatten().map(|&w| u64::from(w))).collect(),
-        View::Unordered(r, c, d) => std::iter::once(3).chain([*r as u64, *c as u64]).chain(d.iter().flatten().map(|&w| u64::from(w))).collect(),
-        View::Sampler(w) => std::iter::once(4).chain(w.iter().map(|&w| u64::from(w))).collect(),
-        View::ConsoleSampler(w) => std::iter::once(5).chain(w.iter().map(|&w| u64::from(w))).collect(),
-        View::Placed(u, a, b) => std::iter::once(6 + u64::from(*u)).chain(a.iter().chain(b.iter()).map(|&w| u64::from(w))).collect(),
-    };
-    words.into_iter().for_each(|w| mix(h, w));
-}
-
-/// A new table (at `table`, `n` slots, its records hashed `records`) made.
-#[cfg(feature = "diagnostics")]
-fn cross_frame_seen(table: u64, n: u32, records: u64) {
-    let mut views = 0xcbf2_9ce4_8422_2325u64;
-    for k in 0..n {
-        view_hash(&mut views, crate::descriptor::view(table + u64::from(k) * 32).as_ref());
-    }
-    let frame = crate::frame::current();
-    let mut sets = CROSS_SETS.lock().unwrap_or_else(|e| e.into_inner());
-    let s = sets.get_or_insert_with(CrossFrame::default);
-    if s.frame != frame {
-        s.frame = frame;
-        for set in [&mut s.records, &mut s.views] {
-            set[0] = std::mem::take(&mut set[1]);
-        }
-        s.places[0] = std::mem::take(&mut s.places[1]);
-    }
-    let n64 = u64::from(n);
-    CROSS[0].fetch_add(1, Ordering::Relaxed);
-    CROSS[1].fetch_add(n64, Ordering::Relaxed);
-    if s.records[0].contains(&(n, records)) {
-        CROSS[2].fetch_add(1, Ordering::Relaxed);
-        CROSS[3].fetch_add(n64, Ordering::Relaxed);
-    }
-    if s.views[0].contains(&(n, views)) {
-        CROSS[4].fetch_add(1, Ordering::Relaxed);
-        CROSS[5].fetch_add(n64, Ordering::Relaxed);
-    }
-    if s.places[0].contains(&(table, n)) {
-        CROSS[6].fetch_add(1, Ordering::Relaxed);
-        CROSS[7].fetch_add(n64, Ordering::Relaxed);
-    }
-    s.records[1].insert((n, records));
-    s.views[1].insert((n, views));
-    s.places[1].insert((table, n));
-}
-
-/// (Fox T, diagnostics) New tables without and with slots picked by a root
-/// constant: tables, slots built, slots the program names.
-#[cfg(feature = "diagnostics")]
-static NAMED: [AtomicU64; 6] = [const { AtomicU64::new(0) }; 6];
-
-/// For the frame lines.
-#[cfg(feature = "diagnostics")]
-pub(crate) fn cross_frame_line(frames: f64) {
-    if !crate::copystep::list_meter() {
-        return;
-    }
-    {
-        let v: [u64; 6] = std::array::from_fn(|i| NAMED[i].swap(0, Ordering::Relaxed));
-        let f = frames.max(1.0);
-        tracing::info!(
-            "new tables' slots built vs named by the program per frame (VICTORY_LIST_CALLS): without picked slots {:.0} tables, {:.0} slots built, {:.0} named ({:.1} %);              with slots picked by a root constant {:.0} tables, {:.0} built, {:.0} named",
-            v[0] as f64 / f,
-            v[1] as f64 / f,
-            v[2] as f64 / f,
-            100.0 * v[2] as f64 / v[1].max(1) as f64,
-            v[3] as f64 / f,
-            v[4] as f64 / f,
-            v[5] as f64 / f,
-        );
-    }
-    let v: [u64; 8] = std::array::from_fn(|i| CROSS[i].swap(0, Ordering::Relaxed));
-    if v[0] == 0 {
-        return;
-    }
-    let f = frames.max(1.0);
-    let pct = |a: u64, b: u64| 100.0 * a as f64 / b.max(1) as f64;
-    tracing::info!(
-        "new tables against the frame before (VICTORY_LIST_CALLS) per frame: {:.0} tables, {:.0} slots; the same records as a table of the frame before          {:.0} ({:.1} %, slots {:.1} %); the same views (whatever their records) {:.0} ({:.1} %, slots {:.1} %); at the same address with as many slots {:.0} ({:.1} %)",
-        v[0] as f64 / f,
-        v[1] as f64 / f,
-        v[2] as f64 / f,
-        pct(v[2], v[0]),
-        pct(v[3], v[1]),
-        v[4] as f64 / f,
-        pct(v[4], v[0]),
-        pct(v[5], v[1]),
-        v[6] as f64 / f,
-        pct(v[6], v[0]),
-    );
-}
-
-/// `VICTORY_TABLE_NAMED_ONLY`: 0 off (default); 1 a new table's slots made
-/// only where the program can read them ([`TableGroup::named`]), the others
-/// left as they are (no shader reads them), and made when a later program of
-/// the list that reuses the table reads them; 2 verify (every slot made as
-/// before; what named-only would have made is kept and checked).
-fn table_named_only() -> u8 {
-    static ON: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| match std::env::var("VICTORY_TABLE_NAMED_ONLY").as_deref() {
-        Ok("1") => 1,
-        Ok("verify") => 2,
-        _ => 0,
-    })
-}
-
-/// The slots below `n` a program reads of `group`'s table; `None`: any.
-fn named_need(group: &TableGroup, n: u32) -> Option<&[u32]> {
-    let named = group.named.as_deref()?;
-    Some(&named[..named.partition_point(|&k| k < n)])
-}
-
-fn bit(bits: &[u64], k: u32) -> bool {
-    bits.get((k / 64) as usize).is_some_and(|w| w >> (k % 64) & 1 != 0)
-}
-
-fn set_bit(bits: &mut [u64], k: u32) {
-    if let Some(w) = bits.get_mut((k / 64) as usize) {
-        *w |= 1 << (k % 64);
-    }
-}
-
-/// (`VICTORY_TABLE_NAMED_ONLY`) 0 slots left as they are (verify: would
-/// be); 1 reused tables with slots added, 2 the slots; 3 verify: slots a
-/// program names not ready (must be 0); 4 verify: slots the code reads past
-/// the table (made by neither path); 5 verify: slots the code reads that its
-/// used-resource list does not name; 6 new tables named-only applies to; 7
-/// new tables.
-static NAMED_ONLY: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
-
-thread_local! {
-    static NAMED_ONLY_LOCAL: std::cell::RefCell<([u64; 8], u32)> = const { std::cell::RefCell::new(([0; 8], 0)) };
-}
-
-fn named_count(i: usize, by: u64) {
-    if table_named_only() == 0 {
-        return;
-    }
-    NAMED_ONLY_LOCAL.with_borrow_mut(|(c, n)| {
-        c[i] += by;
-        *n += 1;
-        if *n >= 2048 {
-            *n = 0;
-            for (k, v) in c.iter_mut().enumerate() {
-                NAMED_ONLY[k].fetch_add(std::mem::take(v), Ordering::Relaxed);
-            }
-        }
-    });
-}
-
-/// For the frame lines.
-pub(crate) fn table_named_only_line(frames: f64) {
-    if table_named_only() == 0 {
-        return;
-    }
-    let v: [u64; 8] = std::array::from_fn(|i| NAMED_ONLY[i].swap(0, Ordering::Relaxed));
-    let f = frames.max(1.0);
-    tracing::info!(
-        "named-only tables (VICTORY_TABLE_NAMED_ONLY={}) per frame: new tables {:.0}, of them named-only {:.0}; slots skipped {:.0}; \
-         tables reused with slots added {:.1} ({:.1} slots); verify: slots a program names not ready {:.1} (must be 0), \
-         slots the code reads past the table {:.1}, slots the code reads that its used list does not name {:.1}",
-        if table_named_only() == 2 { "verify" } else { "1" },
-        v[7] as f64 / f,
-        v[6] as f64 / f,
-        v[0] as f64 / f,
-        v[1] as f64 / f,
-        v[2] as f64 / f,
-        v[3] as f64 / f,
-        v[4] as f64 / f,
-        v[5] as f64 / f,
-    );
-}
-
-#[cfg(not(feature = "diagnostics"))]
-struct TableSplit;
-
-#[cfg(not(feature = "diagnostics"))]
-impl TableSplit {
-    fn begin() -> Self {
-        TableSplit
-    }
-    #[allow(dead_code)]
-    fn lap(&mut self, _: usize) {}
-    #[allow(dead_code)]
-    fn count(_: usize) {}
-}
-
 /// FNV-1a over 64-bit words.
 fn mix(h: &mut u64, x: u64) {
     *h ^= x;
@@ -1351,38 +1104,6 @@ fn heap_spread() -> bool {
     *ON.get_or_init(|| std::env::var_os("VICTORY_HEAP_SPREAD").is_none_or(|v| v != "0"))
 }
 
-fn heap_parts() -> u64 {
-    static PARTS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-    *PARTS.get_or_init(|| {
-        std::env::var("VICTORY_HEAP_PARTS")
-            .ok()
-            .and_then(|v| v.trim().parse::<u64>().ok())
-            .filter(|&n| n >= 1)
-            .map(|n| n.min(u32::MAX as u64))
-            .unwrap_or(HEAP_ROUND)
-    })
-}
-
-fn changed_limit() -> usize {
-    static LIMIT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *LIMIT.get_or_init(|| {
-        std::env::var("VICTORY_HEAP_CHANGED_MAX")
-            .ok()
-            .and_then(|v| v.trim().parse().ok())
-            .unwrap_or(4096)
-    })
-}
-
-fn pass_limit() -> usize {
-    static LIMIT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *LIMIT.get_or_init(|| {
-        std::env::var("VICTORY_HEAP_PASS_MAX")
-            .ok()
-            .and_then(|v| v.trim().parse().ok())
-            .unwrap_or(2048)
-    })
-}
-
 /// The host copy and range the buffer view of each of a heap's slots reads
 /// ([`State::heap_buffers`]), by slot.
 #[derive(Default)]
@@ -1394,18 +1115,11 @@ pub(crate) struct BufferSweep {
     ranges: HeapRanges<std::sync::Arc<crate::shadow::Shadow>>,
     // Last refresh frame and covered interval for throttled, unwatched copies.
     unwatched: std::collections::HashMap<u64, (u64, u64, u64)>,
-    // Written slots a pass did not get to, for the next one.
-    pending: Vec<u32>,
 }
 
 impl Default for BufferSweep {
     fn default() -> Self {
-        Self {
-            passes: 0,
-            ranges: HeapRanges(Vec::new()),
-            unwatched: Default::default(),
-            pending: Vec::new(),
-        }
+        Self { passes: 0, ranges: HeapRanges(Vec::new()), unwatched: Default::default() }
     }
 }
 
@@ -1614,8 +1328,6 @@ fn root_view(list: &HostList, address: u64, srv: bool) -> Option<u64> {
         .min(if srv { limit } else { 1 << 16 });
     let gpu = shadow.gpu(address);
     if srv || gpu % 256 == 0 {
-        #[cfg(feature = "diagnostics")]
-        crate::host::refresh_kind(0);
         shadow.refresh(list, address, len);
         #[cfg(feature = "diagnostics")]
         crate::book::root(gpu, len);
@@ -1651,38 +1363,18 @@ fn heap_buffer_pass(heap: &crate::descriptor::Heap, host: &crate::descriptor::ho
     // released resource goes stale without a write, and a slot written
     // before its memory had a host copy is only made then.
     let mut kept = host.buffer_sweep.lock().unwrap_or_else(|e| e.into_inner());
-    let spread = heap_spread();
-    let parts = heap_parts();
+    let BufferSweep { passes, ranges, unwatched } = &mut *kept;
     let changed = host.buffer_changes();
-    let changed = if spread {
-        let pending = &mut kept.pending;
-        pending.extend(changed);
-        pending.sort_unstable();
-        pending.dedup();
-        let limit = changed_limit();
-        let take = if limit == 0 { pending.len() } else { pending.len().min(limit) };
-        pending.drain(..take).collect()
-    } else {
-        changed
-    };
-    let BufferSweep { passes, ranges, unwatched, pending, .. } = &mut *kept;
-    let all = !spread && (*passes == 0 || *passes % parts == 0);
+    let all = *passes == 0 || (*passes % HEAP_ROUND == 0 && !heap_spread());
     let slots = if all {
         ranges.0.clear();
         host.buffer_slots()
-    } else if spread {
+    } else if heap_spread() {
         // The written ones, and this pass's part of the others.
-        let (part, parts_u32) = ((*passes % parts) as u32, parts as u32);
-        ranges.forget_part(part, parts_u32);
-        let mut slots = host.buffer_slots_of(part, parts_u32);
+        let (part, parts) = ((*passes % HEAP_ROUND) as u32, HEAP_ROUND as u32);
+        ranges.forget_part(part, parts);
+        let mut slots = host.buffer_slots_of(part, parts);
         slots.extend(changed);
-        let limit = pass_limit();
-        if limit > 0 && slots.len() > limit {
-            let deferred = slots.split_off(limit);
-            pending.extend(deferred);
-            pending.sort_unstable();
-            pending.dedup();
-        }
         slots
     } else {
         changed
@@ -2147,21 +1839,6 @@ impl State {
         if kind == victory_shader::emit::USER_DISPATCH_THREADS_X {
             return 0;
         }
-        // (Fox T, `VICTORY_PROBE_RAYS`) The structures are empty: never built.
-        if kind == victory_shader::emit::USER_BVH_EMPTY {
-            let empty = !crate::pipeline::builder_runs();
-            if empty {
-                PROBE_EMPTY.fetch_add(1, Ordering::Relaxed);
-            }
-            return u32::from(empty);
-        }
-        // (Fox T, `VICTORY_NAN_METER`) The program's place in the counts.
-        if kind == victory_shader::emit::USER_NAN_SLOT {
-            #[cfg(feature = "diagnostics")]
-            return crate::nanmeter::slot(self.pipeline, || crate::pipeline::label(self.pipeline as This));
-            #[cfg(not(feature = "diagnostics"))]
-            return 0;
-        }
         if kind == USER_ROOT_ADDRESS || kind == USER_ROOT_ADDRESS + 1 {
             return match self.roots_ref(compute).get(usize::from(slot)) {
                 Some(&Root::View(address)) if kind == USER_ROOT_ADDRESS => address as u32,
@@ -2276,61 +1953,7 @@ impl State {
     }
 
     /// As [`State::prepare`], for draws (`mesh` false) or mesh dispatches.
-    /// As [`State::prepare_for_once`], with a depth plane used before its pass
-    /// given its twin's contents first (`VICTORY_PLANE_NOW`), and logged.
     fn prepare_for(&mut self, list: &HostList, indexed: bool, mesh: bool) -> bool {
-        #[cfg(feature = "diagnostics")]
-        if crate::resource::e5_meter() {
-            for (i, &t) in self.targets.iter().enumerate() {
-                if crate::resource::e5_stand_in(t as This) {
-                    crate::resource::e5_draw(&crate::pipeline::label(self.pipeline as This), i);
-                }
-            }
-        }
-        let done = self.prepare_for_once(list, indexed, mesh);
-        if done && self.planes_due(list) {
-            return self.prepare_for_once(list, indexed, mesh);
-        }
-        done
-    }
-
-    /// (Fox T) After a bind: depth planes this draw or dispatch uses before
-    /// their pass. Logged (the first 30, with the pipeline); with
-    /// `VICTORY_PLANE_NOW=1` the pass is recorded now and the title's state set
-    /// again: true then, and the caller binds anew.
-    fn planes_due(&mut self, list: &HostList) -> bool {
-        let late = list.take_plane_late();
-        if late.is_empty() {
-            return false;
-        }
-        crate::host::PLANE_LATE[0].fetch_add(late.len() as u64, Ordering::Relaxed);
-        static SAID: AtomicU64 = AtomicU64::new(0);
-        if SAID.fetch_add(1, Ordering::Relaxed) < 30 {
-            #[cfg(feature = "diagnostics")]
-            let pipeline = crate::pipeline::label(self.pipeline as This);
-            #[cfg(not(feature = "diagnostics"))]
-            let pipeline = "";
-            for (depth, _) in &late {
-                // SAFETY: a live texture.
-                let d = unsafe { depth.texture.GetDesc() };
-                tracing::warn!(
-                    %pipeline,
-                    depth = format_args!("{}x{}x{} format {}", d.Width, d.Height, d.DepthOrArraySize, d.Format.0),
-                    now = crate::host::plane_now(),
-                    "a depth plane used before the pass that gives it its twin's contents (VICTORY_PLANE_NOW=1: the pass before this use)"
-                );
-            }
-        }
-        if !crate::host::plane_now() {
-            return false;
-        }
-        list.planes_now(&late);
-        crate::host::PLANE_LATE[1].fetch_add(late.len() as u64, Ordering::Relaxed);
-        self.replay(list);
-        true
-    }
-
-    fn prepare_for_once(&mut self, list: &HostList, indexed: bool, mesh: bool) -> bool {
         #[cfg(feature = "diagnostics")]
         if crate::pipeline::is_skipped(self.pipeline as This) {
             return false;
@@ -2366,8 +1989,6 @@ impl State {
             let Some(shadow) = crate::shadow::find_any(v.address, u64::from(v.size)) else {
                 continue;
             };
-            #[cfg(feature = "diagnostics")]
-            crate::host::refresh_kind(1);
             shadow.refresh(list, v.address, u64::from(v.size));
             *view = D3D12_VERTEX_BUFFER_VIEW {
                 BufferLocation: shadow.gpu(v.address),
@@ -2386,8 +2007,6 @@ impl State {
             let Some(shadow) = crate::shadow::find_any(v.address, u64::from(v.size)) else {
                 return false;
             };
-            #[cfg(feature = "diagnostics")]
-            crate::host::refresh_kind(2);
             shadow.refresh(list, v.address, u64::from(v.size));
             let view = D3D12_INDEX_BUFFER_VIEW {
                 BufferLocation: shadow.gpu(v.address),
@@ -2953,21 +2572,6 @@ impl State {
                 }
             }
             for &(slot, param) in &stage.root_uavs {
-                // (Fox T, `VICTORY_NAN_METER`) Ours: where NaNs are counted.
-                #[cfg(feature = "diagnostics")]
-                if slot == victory_shader::emit::SLOT_NAN {
-                    if let Some(at) = crate::nanmeter::address() {
-                        // SAFETY: an open list; the buffer lives as long as the process.
-                        unsafe {
-                            if compute {
-                                l.SetComputeRootUnorderedAccessView(param, at);
-                            } else {
-                                l.SetGraphicsRootUnorderedAccessView(param, at);
-                            }
-                        }
-                    }
-                    continue;
-                }
                 // (Fox T, `VICTORY_BVH_WALK`) Ours: where node tests are counted.
                 #[cfg(feature = "diagnostics")]
                 if slot == victory_shader::emit::SLOT_WALK {
@@ -3063,8 +2667,6 @@ impl State {
         let pipeline = self.pipeline;
         let ready = |a: u64, s: &std::sync::Arc<crate::shadow::Shadow>| {
             let len = s.left(a).min(limit);
-            #[cfg(feature = "diagnostics")]
-            crate::host::refresh_kind(3);
             s.refresh(list, a, len);
             if writes {
                 #[cfg(feature = "diagnostics")]
@@ -3223,8 +2825,6 @@ impl State {
         // As for root descriptors (`root_view`): all that is left of the
         // buffer is brought up to date. The first 1 MiB only left what lay
         // past it stale (most mesh vertex streams reach further).
-        #[cfg(feature = "diagnostics")]
-        crate::host::refresh_kind(4);
         if let Some((a, s)) = &shadow
             && !self.root_ready_memo(list, (*a, 2), |list| s.refresh(list, *a, s.left(*a)))
         {
@@ -3298,8 +2898,6 @@ impl State {
             });
         } else {
             for (shadow, from, to) in heap_buffer_pass(heap, host, frame) {
-                #[cfg(feature = "diagnostics")]
-                crate::host::refresh_kind(5);
                 shadow.refresh(list, from, to - from);
             }
         }
@@ -3765,13 +3363,6 @@ impl State {
         // returned here, and a slot whose texture had been streamed out
         // kept its host copy for as long as the card was full).
         let mut room = crate::resource::room(memory);
-        if !room {
-            // fxceless#1269: give idle textures and host copies one immediate
-            // chance to leave before refusing new texture slots.
-            crate::shadow::let_go_idle();
-            crate::resource::let_go_idle();
-            room = crate::resource::room(crate::host::host().and_then(|h| h.video_memory()));
-        }
         // Bytes uploaded by this pass since the card was last asked
         // whether it has room: asked again every 32 MiB (a pass may upload
         // 192 MB and more, and one asking a pass let the queue run some
@@ -4372,7 +3963,7 @@ impl State {
             once!("a dispatch with a graphics pipeline");
             return;
         }
-        if !self.bind(list, p, true) || (self.planes_due(list) && !self.bind(list, p, true)) {
+        if !self.bind(list, p, true) {
             DROPPED.fetch_add(1, Ordering::Relaxed);
             // A stage of the structure builder that cannot be bound is a
             // dropped stage: the others stop too.
@@ -5054,6 +4645,7 @@ impl State {
         plan: &TablePlan,
         compute: bool,
     ) -> Few<(u8, u32), 16> {
+        #[cfg(feature = "diagnostics")]
         let mut ts = TableSplit::begin();
         let mut fresh = [0u64; 4];
         let selected_slot = |mask: &[u64; 4], slot: u8| mask[usize::from(slot / 64)] & (1u64 << (slot % 64)) != 0;
@@ -5167,48 +4759,6 @@ impl State {
             let reader = (std::ptr::from_ref(plan) as usize, plan.direct.len(), STORES.get(), TESTED_DEPTH.get().0);
             if let Some(known) = self.fresh_tables.get_mut(&key) {
                 let first = known.first;
-                // (Fox T, `VICTORY_TABLE_NAMED_ONLY`) Slots this program reads
-                // that the table was made without: made now (verify: only noted,
-                // the table has all).
-                let mut fill: Vec<u32> = Vec::new();
-                if table_named_only() != 0
-                    && let Some(built) = known.built.as_mut()
-                {
-                    let all: Vec<u32>;
-                    let need: &[u32] = match named_need(group, n) {
-                        Some(need) => need,
-                        None => {
-                            all = (0..n).collect();
-                            &all
-                        }
-                    };
-                    let missing: Vec<u32> = need.iter().copied().filter(|&k| !bit(built, k)).collect();
-                    if !missing.is_empty() {
-                        for &k in &missing {
-                            set_bit(built, k);
-                        }
-                        named_count(1, 1);
-                        named_count(2, missing.len() as u64);
-                        if table_named_only() == 1 {
-                            fill = missing;
-                        }
-                    }
-                }
-                if !fill.is_empty() {
-                    let title_first = heap.index(table).filter(|first| first + n <= host.count());
-                    self.build_slots(list, heap, host, table, first, slot, group, &selected, &half, title_first, &fill, &mut ts);
-                }
-                let Some(known) = self.fresh_tables.get_mut(&key) else { continue };
-                if table_named_only() == 2
-                    && let Some(built) = known.built.as_ref()
-                {
-                    // Every slot this program names ready, whatever path follows.
-                    let short = match named_need(group, n) {
-                        Some(need) => need.iter().filter(|&&k| !bit(built, k)).count(),
-                        None => (0..n).filter(|&k| !bit(built, k)).count(),
-                    };
-                    named_count(3, short as u64);
-                }
                 // This reader had it brought up to date, and nothing in the
                 // list changed since: nothing to do again.
                 let once = ready_once() && selected.is_empty() && !group.has_uav;
@@ -5289,41 +4839,8 @@ impl State {
                 if crate::copystep::list_meter() && !self.fresh_contents.insert((key.1, key.2)) {
                     TableSplit::count(7);
                 }
-                if crate::copystep::list_meter() {
-                    cross_frame_seen(table, n, key.2);
-                    // (b) Slots the program names (its used-resource list and
-                    // the ones picked by a root constant) against those built.
-                    let named = (0..n).filter(|&k| group.entry(k).is_some() || selected.binary_search(&k).is_ok()).count() as u64;
-                    let i = if group.indexed.is_empty() { 0 } else { 3 };
-                    NAMED[i].fetch_add(1, Ordering::Relaxed);
-                    NAMED[i + 1].fetch_add(u64::from(n), Ordering::Relaxed);
-                    NAMED[i + 2].fetch_add(named, Ordering::Relaxed);
-                }
             }
-            // (Fox T, `VICTORY_TABLE_NAMED_ONLY`) The slots made (as if, verify).
-            let built = match named_need(group, n) {
-                Some(need) if table_named_only() != 0 => {
-                    let mut bits = vec![0u64; n.div_ceil(64) as usize];
-                    for &k in need {
-                        set_bit(&mut bits, k);
-                    }
-                    named_count(6, 1);
-                    // (Verify) What the code reads past the table's slots (never
-                    // made, as before), and what it reads that the used-resource
-                    // list does not name.
-                    if table_named_only() == 2
-                        && let Some(named) = &group.named
-                    {
-                        named_count(4, named.iter().filter(|&&k| k >= n).count() as u64);
-                        named_count(5, need.iter().filter(|&&k| group.entry(k).is_none()).count() as u64);
-                        named_count(0, u64::from(n) - need.len() as u64);
-                    }
-                    Some(bits)
-                }
-                _ => None,
-            };
-            named_count(7, 1);
-            self.fresh_tables.insert(key, FreshTable { first, epoch: 0, ready: Vec::new(), built });
+            self.fresh_tables.insert(key, FreshTable { first, epoch: 0, ready: Vec::new() });
             self.dynamic
                 .push((std::ptr::from_ref(heap) as usize, host.id(), first, n));
             // The title's own slots of this table: what the draw reads of
@@ -5337,148 +4854,85 @@ impl State {
                     host.slot_tabled(title + k);
                 }
             }
-            let all: Vec<u32>;
-            let ks: &[u32] = match named_need(group, n) {
-                Some(need) if table_named_only() == 1 => {
-                    named_count(0, u64::from(n) - need.len() as u64);
-                    need
-                }
-                _ => {
-                    all = (0..n).collect();
-                    &all
-                }
-            };
-            self.build_slots(list, heap, host, table, first, slot, group, &selected, &half, title_first, ks, &mut ts);
-            // (`VICTORY_TABLE_NAMED_ONLY=1`) The slots left as they are: of a
-            // big table, a texture view's title slot is a table's all the
-            // same, as building it says (`texture_slot_tabled`, not read).
-            if ks.len() as u32 != n
-                && n > 64
-                && let Some(title) = title_first
-            {
-                for k in (0..n).filter(|k| ks.binary_search(k).is_err()) {
-                    if crate::descriptor::view(table + u64::from(k) * 32).is_some_and(|v| crate::descriptor::host::is_texture_view(&v)) {
-                        host.texture_slot_tabled(title + k, false);
-                    }
-                }
+            let list_views = crate::descriptor::host::list_views();
+            if self.recording == 0 {
+                static NEXT: AtomicU64 = AtomicU64::new(1);
+                self.recording = NEXT.fetch_add(1, Ordering::Relaxed);
             }
-            made.push((slot, first * 32));
+            let recording = self.recording;
             #[cfg(feature = "diagnostics")]
-            ts.lap(10);
-        }
-        #[cfg(feature = "diagnostics")]
-        ts.lap(6);
-        made
-    }
-
-    /// The slots `ks` of the table at `table` made afresh at dynamic slot
-    /// `first` (`State::tables`): views copied or made, and what the draw
-    /// reads of them made readable.
-    #[allow(clippy::too_many_arguments)]
-    fn build_slots(
-        &mut self,
-        list: &HostList,
-        heap: &'static crate::descriptor::Heap,
-        host: &'static crate::descriptor::host::HostHeap,
-        table: u64,
-        first: u32,
-        slot: u8,
-        group: &TableGroup,
-        selected: &[u32],
-        half: &[(u8, u32)],
-        title_first: Option<u32>,
-        ks: &[u32],
-        ts: &mut TableSplit,
-    ) {
-        let list_views = crate::descriptor::host::list_views();
-        if self.recording == 0 {
-            static NEXT: AtomicU64 = AtomicU64::new(1);
-            self.recording = NEXT.fetch_add(1, Ordering::Relaxed);
-        }
-        let recording = self.recording;
-        #[cfg(feature = "diagnostics")]
-        ts.lap(4);
-        let batching = crate::descriptor::host::list_batch() || crate::descriptor::host::list_hold();
-        let mut batch = std::mem::take(&mut self.copy_batch);
-        batch.now = !crate::descriptor::host::list_batch();
-        // The whole range unless `ks` says otherwise
-        // (`VICTORY_TABLE_NAMED_ONLY`): a shader may index past the entries
-        // its used-resource list names (descriptor arrays).
-        for &k in ks {
-            #[cfg(feature = "diagnostics")]
-            {
-                TableSplit::count(5);
-                ts.lap(10);
-            }
-            let index = first + k;
-            // A view this list has made before: its descriptor copied,
-            // and nothing more if nothing changed in the list since.
-            if list_views
-                && !half.contains(&(slot, k * 8))
-                && let Some(words) = crate::descriptor::record_at(table + u64::from(k) * 32)
-                && let Some(mut listed) = if batching {
-                    host.make_listed_batched(recording, words, index, &mut batch)
-                } else {
-                    host.make_listed(recording, words, index)
-                }
-            {
+            ts.lap(4);
+            let batching = crate::descriptor::host::list_batch();
+            let mut batch = std::mem::take(&mut self.copy_batch);
+            // The whole range: a shader may index past the entries its
+            // used-resource list names (descriptor arrays).
+            for k in 0..n {
                 #[cfg(feature = "diagnostics")]
-                ts.lap(7);
-                let kind = group
-                    .entry(k)
-                    .map(|u| u.kind)
-                    .or_else(|| selected.binary_search(&k).ok().and(listed.kind));
-                let was = (listed.ready, listed.tabled);
-                if let Some(kind) = kind {
-                    let tested = TESTED_DEPTH.get();
-                    // (Fox T, `VICTORY_LIST_ALIAS_EXACT=1`) A view of an aliased
-                    // texture is not known ready by the epoch: its copy follows
-                    // the source's writes (`crate::texture::alias`).
-                    let alias_view = (kind == ResourceType::Srv
-                        && list_alias_exact()
-                        && listed.ready.0 == list.epoch()
-                        && listed.ready.1 == tested.0)
-                        .then(|| crate::descriptor::host::listed_view(recording, words))
-                        .flatten()
-                        .filter(aliased_view);
-                    if let Some(view) = alias_view {
-                        let (epoch, steps) = (list.epoch(), list.deferred_steps());
-                        TESTED_DEPTH.set((tested.0, false));
-                        readable(list, kind, &view, 0);
-                        let depth = TESTED_DEPTH.get().1;
-                        TESTED_DEPTH.set((tested.0, tested.1 || depth));
-                        LIST_ALIAS[0].fetch_add(1, Ordering::Relaxed);
-                        if list.epoch() != epoch || list.deferred_steps() != steps {
-                            // The skip would have read stale texels.
-                            LIST_ALIAS[1].fetch_add(1, Ordering::Relaxed);
-                            listed.ready = (list.epoch(), tested.0, depth);
-                            static SAID: AtomicU64 = AtomicU64::new(0);
-                            if SAID.fetch_add(1, Ordering::Relaxed) < 30 {
-                                #[cfg(feature = "diagnostics")]
-                                let pipeline = crate::pipeline::label(self.pipeline as This);
-                                #[cfg(not(feature = "diagnostics"))]
-                                let pipeline = "";
-                                tracing::warn!(
-                                    view = %alias_label(&view),
-                                    %pipeline,
-                                    "an aliased texture's copy redone where the list's views took it as ready (VICTORY_LIST_ALIAS_EXACT): without it this draw reads the copy as it was"
-                                );
-                            }
-                        }
-                    } else if kind == ResourceType::Srv && listed.ready.0 == list.epoch() && listed.ready.1 == tested.0 {
-                        if listed.ready.2 {
-                            TESTED_DEPTH.set((tested.0, true));
-                        }
+                {
+                    TableSplit::count(5);
+                    ts.lap(10);
+                }
+                let index = first + k;
+                // A view this list has made before: its descriptor copied,
+                // and nothing more if nothing changed in the list since.
+                if list_views
+                    && !half.contains(&(slot, k * 8))
+                    && let Some(words) = crate::descriptor::record_at(table + u64::from(k) * 32)
+                    && let Some(mut listed) = if batching {
+                        host.make_listed_batched(recording, words, index, &mut batch)
                     } else {
-                        // (Fox T, `VICTORY_TABLE_MEMO_SLOTS`) The same entry made
-                        // readable earlier in the list, nothing changed since.
-                        let handle = table + u64::from(k) * 32;
-                        let memo = if table_memo_slots() { self.entry_begin(list, handle, kind) } else { EntryMemo::Off };
-                        if !matches!(memo, EntryMemo::Skip)
-                            && let Some(view) = crate::descriptor::host::listed_view(recording, words)
-                        {
+                        host.make_listed(recording, words, index)
+                    }
+                {
+                    #[cfg(feature = "diagnostics")]
+                    ts.lap(7);
+                    let kind = group
+                        .entry(k)
+                        .map(|u| u.kind)
+                        .or_else(|| selected.binary_search(&k).ok().and(listed.kind));
+                    let was = (listed.ready, listed.tabled);
+                    if let Some(kind) = kind {
+                        let tested = TESTED_DEPTH.get();
+                        // (Fox T, `VICTORY_LIST_ALIAS_EXACT=1`) A view of an aliased
+                        // texture is not known ready by the epoch: its copy follows
+                        // the source's writes (`crate::texture::alias`).
+                        let alias_view = (kind == ResourceType::Srv
+                            && list_alias_exact()
+                            && listed.ready.0 == list.epoch()
+                            && listed.ready.1 == tested.0)
+                            .then(|| crate::descriptor::host::listed_view(recording, words))
+                            .flatten()
+                            .filter(aliased_view);
+                        if let Some(view) = alias_view {
+                            let (epoch, steps) = (list.epoch(), list.deferred_steps());
+                            TESTED_DEPTH.set((tested.0, false));
+                            readable(list, kind, &view, 0);
+                            let depth = TESTED_DEPTH.get().1;
+                            TESTED_DEPTH.set((tested.0, tested.1 || depth));
+                            LIST_ALIAS[0].fetch_add(1, Ordering::Relaxed);
+                            if list.epoch() != epoch || list.deferred_steps() != steps {
+                                // The skip would have read stale texels.
+                                LIST_ALIAS[1].fetch_add(1, Ordering::Relaxed);
+                                listed.ready = (list.epoch(), tested.0, depth);
+                                static SAID: AtomicU64 = AtomicU64::new(0);
+                                if SAID.fetch_add(1, Ordering::Relaxed) < 30 {
+                                    #[cfg(feature = "diagnostics")]
+                                    let pipeline = crate::pipeline::label(self.pipeline as This);
+                                    #[cfg(not(feature = "diagnostics"))]
+                                    let pipeline = "";
+                                    tracing::warn!(
+                                        view = %alias_label(&view),
+                                        %pipeline,
+                                        "an aliased texture's copy redone where the list's views took it as ready (VICTORY_LIST_ALIAS_EXACT): without it this draw reads the copy as it was"
+                                    );
+                                }
+                            }
+                        } else if kind == ResourceType::Srv && listed.ready.0 == list.epoch() && listed.ready.1 == tested.0 {
+                            if listed.ready.2 {
+                                TESTED_DEPTH.set((tested.0, true));
+                            }
+                        } else if let Some(view) = crate::descriptor::host::listed_view(recording, words) {
                             let _ = crate::residency::take_staging_deferred();
-                            let tested = TESTED_DEPTH.get();
                             TESTED_DEPTH.set((tested.0, false));
                             readable(list, kind, &view, 0);
                             let depth = TESTED_DEPTH.get().1;
@@ -5486,97 +4940,97 @@ impl State {
                             if kind == ResourceType::Srv && !crate::residency::take_staging_deferred() {
                                 listed.ready = (list.epoch(), tested.0, depth);
                             }
-                            self.entry_end(list, memo, Some(&view));
                         }
                     }
-                }
-                #[cfg(feature = "diagnostics")]
-                ts.lap(8);
-                if let Some(title) = title_first
-                    && listed.texture
-                    && listed.tabled != Some((title + k, kind.is_some()))
-                {
-                    listed.tabled = Some((title + k, kind.is_some()));
-                    host.texture_slot_tabled(title + k, kind.is_some());
-                    if kind.is_some() {
-                        host.mirror_after(list, title + k, table + u64::from(k) * 32);
-                    }
-                }
-                if was != (listed.ready, listed.tabled) {
-                    crate::descriptor::host::note_listed(recording, words, listed);
-                }
-                #[cfg(feature = "diagnostics")]
-                {
-                    TableSplit::count(6);
-                    ts.lap(9);
-                }
-                continue;
-            }
-            let used = group.entry(k);
-            match crate::descriptor::view(table + u64::from(k) * 32) {
-                Some(View::Constant(address, size)) => {
-                    let Some((buffer, gpu, to)) = list.scratch_held(u64::from(size)) else {
-                        host.make_null(index);
-                        continue;
-                    };
-                    let slot = (std::ptr::from_ref(heap) as usize, index);
-                    list.defer_constants(to, address as *const u8, size as usize, slot);
-                    host.constant_at(index, &buffer, gpu, size);
-                }
-                Some(view) => {
-                    // (fxceless #927) The unsigned twin where the shader moves halves.
-                    let twin = if half.contains(&(slot, k * 8)) {
-                        crate::descriptor::host::half_view(&view)
-                    } else {
-                        None
-                    };
-                    match twin {
-                        Some(twin) => {
-                            HALF_VIEWS_SHOWN.fetch_add(1, Ordering::Relaxed);
-                            host.make_at(index, &twin);
-                        }
-                        None => host.make_at(index, &view),
-                    }
-                    let kind = used.map(|u| u.kind).or_else(|| {
-                        selected.binary_search(&k).ok().and_then(|_| view_kind(&view))
-                    });
-                    if let Some(kind) = kind {
-                        let handle = table + u64::from(k) * 32;
-                        let memo = if table_memo_slots() { self.entry_begin(list, handle, kind) } else { EntryMemo::Off };
-                        if !matches!(memo, EntryMemo::Skip) {
-                            readable(list, kind, &view, 0);
-                            self.entry_end(list, memo, Some(&view));
-                        }
-                    }
-                    // The title's slot is a table's: out of the queue
-                    // of textures picked by index if the draw read it
-                    // (its texture is up to date now), and made in
-                    // place as the texture pass would have made it,
-                    // for a shader that picks it by index all the same.
+                    #[cfg(feature = "diagnostics")]
+                    ts.lap(8);
                     if let Some(title) = title_first
-                        && crate::descriptor::host::is_texture_view(&view)
+                        && listed.texture
+                        && listed.tabled != Some((title + k, kind.is_some()))
                     {
+                        listed.tabled = Some((title + k, kind.is_some()));
                         host.texture_slot_tabled(title + k, kind.is_some());
                         if kind.is_some() {
                             host.mirror_after(list, title + k, table + u64::from(k) * 32);
                         }
                     }
+                    if was != (listed.ready, listed.tabled) {
+                        crate::descriptor::host::note_listed(recording, words, listed);
+                    }
+                    #[cfg(feature = "diagnostics")]
+                    {
+                        TableSplit::count(6);
+                        ts.lap(9);
+                    }
+                    continue;
                 }
-                None => {
-                    host.make_null(index);
-                    if used.is_some() {
-                        once!(slot, "a table entry without a view");
+                let used = group.entry(k);
+                match crate::descriptor::view(table + u64::from(k) * 32) {
+                    Some(View::Constant(address, size)) => {
+                        let Some((buffer, gpu, to)) = list.scratch_held(u64::from(size)) else {
+                            host.make_null(index);
+                            continue;
+                        };
+                        let slot = (std::ptr::from_ref(heap) as usize, index);
+                        list.defer_constants(to, address as *const u8, size as usize, slot);
+                        host.constant_at(index, &buffer, gpu, size);
+                    }
+                    Some(view) => {
+                        // (fxceless #927) The unsigned twin where the shader moves halves.
+                        let twin = if half.contains(&(slot, k * 8)) {
+                            crate::descriptor::host::half_view(&view)
+                        } else {
+                            None
+                        };
+                        match twin {
+                            Some(twin) => {
+                                HALF_VIEWS_SHOWN.fetch_add(1, Ordering::Relaxed);
+                                host.make_at(index, &twin);
+                            }
+                            None => host.make_at(index, &view),
+                        }
+                        let kind = used.map(|u| u.kind).or_else(|| {
+                            selected.binary_search(&k).ok().and_then(|_| view_kind(&view))
+                        });
+                        if let Some(kind) = kind {
+                            readable(list, kind, &view, 0);
+                        }
+                        // The title's slot is a table's: out of the queue
+                        // of textures picked by index if the draw read it
+                        // (its texture is up to date now), and made in
+                        // place as the texture pass would have made it,
+                        // for a shader that picks it by index all the same.
+                        if let Some(title) = title_first
+                            && crate::descriptor::host::is_texture_view(&view)
+                        {
+                            host.texture_slot_tabled(title + k, kind.is_some());
+                            if kind.is_some() {
+                                host.mirror_after(list, title + k, table + u64::from(k) * 32);
+                            }
+                        }
+                    }
+                    None => {
+                        host.make_null(index);
+                        if used.is_some() {
+                            once!(slot, "a table entry without a view");
+                        }
                     }
                 }
             }
-        }
-        if batching {
-            crate::descriptor::host::flush_copies(&mut batch);
-            for resource in batch.keep.drain(..) {
-                list.keep(&resource);
+            if batching {
+                crate::descriptor::host::flush_copies(&mut batch);
+                for resource in batch.keep.drain(..) {
+                    list.keep(&resource);
+                }
             }
+            self.copy_batch = batch;
+            made.push((slot, first * 32));
+            #[cfg(feature = "diagnostics")]
+            ts.lap(10);
         }
-        self.copy_batch = batch;
+        #[cfg(feature = "diagnostics")]
+        ts.lap(6);
+        made
     }
 
     /// The first draws, at debug level: what they bind and read
@@ -5977,8 +5431,6 @@ impl State {
         split.part(2);
         // One record without a count: clamped in a batch (`batches`).
         let batch = if batches() > 0 && max == 1 && count.is_none() {
-            #[cfg(feature = "diagnostics")]
-            crate::host::refresh_kind(6);
             args.refresh(list, arguments, len);
             self.batched(list, &args, arguments, kind)
         } else {
@@ -6034,12 +5486,8 @@ impl State {
                     }
                     _ => (stride, max),
                 };
-                #[cfg(feature = "diagnostics")]
-                crate::host::refresh_kind(6);
                 args.refresh(list, arguments, len.max(u64::from(step) * u64::from(records)));
                 if let Some((s, at)) = &counter {
-                    #[cfg(feature = "diagnostics")]
-                    crate::host::refresh_kind(6);
                     s.refresh(list, *at, 4);
                 }
                 // Bounded first: the clamp binds a compute pipeline of its
@@ -6087,7 +5535,7 @@ impl State {
         let ran = match kind {
             DRAW | INDEXED => self.prepare(list, kind == INDEXED),
             MESH => self.prepare_for(list, false, true),
-            DISPATCH => self.bind(list, p, true) && (!self.planes_due(list) || self.bind(list, p, true)),
+            DISPATCH => self.bind(list, p, true),
             _ => false,
         };
         #[cfg(feature = "diagnostics")]
@@ -6422,9 +5870,6 @@ impl<T, const N: usize> std::ops::DerefMut for Few<T, N> {
 /// A table made afresh in dynamic slots, in a list ([`State::tables`]).
 struct FreshTable {
     first: u32,
-    /// (Fox T, `VICTORY_TABLE_NAMED_ONLY`) Its slots made, one bit each
-    /// (verify: those named-only would have made); `None`: all.
-    built: Option<Vec<u64>>,
     /// The list's epoch ([`HostList::epoch`]) at which all its entries that
     /// these readers (a stage's list of what it reads, whether it stores, the
     /// tested depth target) read were brought up to date, and whether that read the
@@ -6475,8 +5920,6 @@ fn readable(list: &HostList, kind: ResourceType, view: &View, record: u64) {
     if let Some((shadow, address, len)) = crate::descriptor::host::buffer_copy(view) {
         #[cfg(feature = "diagnostics")]
         let step = LayerStep::begin(list, "tables: a buffer view's range refreshed");
-        #[cfg(feature = "diagnostics")]
-        crate::host::refresh_kind(7);
         shadow.refresh(list, address, len);
         #[cfg(feature = "diagnostics")]
         drop(step);
@@ -6800,32 +6243,6 @@ mod tests {
         assert_eq!(staging_budget_per_frame(Some(20 * GIB)), 384 * MIB);
         assert_eq!(staging_budget_per_frame(Some(24 * GIB)), 384 * MIB);
         assert_eq!(staging_budget_per_frame(Some(32 * GIB)), 384 * MIB);
-    }
-
-    /// (Fox T, `VICTORY_TABLE_NAMED_ONLY`) A table's named slots: what the code reads
-    /// and what the used-resource list names; any when read at a computed place.
-    #[test]
-    fn named_slots_join_code_reads_and_the_used_list() {
-        use victory_shader::{ResourceType, RootType, UsedResource};
-        let used = |slot, at| UsedResource {
-            kind: ResourceType::Srv,
-            root: RootType::Table,
-            table_offset_dwords: at,
-            lower_bound: 0,
-            stride: 0,
-            dwords: 8,
-            user_data: 0,
-            slot,
-        };
-        let plan = super::TablePlan::new(&[used(1, 0), used(1, 24), used(2, 0)], &[], Some(&[(1, 5), (1, 3), (2, u32::MAX)]));
-        assert_eq!(plan.groups[0].named.as_deref(), Some([0, 3, 5].as_slice()));
-        assert_eq!(super::named_need(&plan.groups[0], 4), Some([0, 3].as_slice()));
-        assert_eq!(plan.groups[1].named, None);
-        let unknown = super::TablePlan::new(&[used(1, 0)], &[], None);
-        assert_eq!(unknown.groups[0].named, None);
-        let mut bits = vec![0u64; 2];
-        super::set_bit(&mut bits, 70);
-        assert!(super::bit(&bits, 70) && !super::bit(&bits, 6));
     }
 }
 
