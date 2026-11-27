@@ -7,7 +7,7 @@
 //! applies none. Keep this list the same as `play.ps1`'s `$set` (cache and save folders left to
 //! the executable's own defaults).
 
-/// `play.ps1`'s standing set, as of op-amd-v7.
+/// `play.ps1`'s standing set, as of op-amd-v12.
 const SET: &[(&str, &str)] = &[
     // The standing set of the fork's runs
     ("VICTORY_JOIN_COPIES", "1"),
@@ -52,19 +52,14 @@ const SET: &[(&str, &str)] = &[
     // Draw set-up
     ("VICTORY_TABLE_MEMO", "1"),
     ("VICTORY_LIST_ALIAS_EXACT", "1"),
-    ("VICTORY_LIST_HOLD", "1"),
-    // Windows in the card's memory through the bus (GPU upload heaps; bench E 27/11: 0.8 GB less RAM)
-    ("VICTORY_WINDOWS_BAR_MB", "1024"),
-    // Renderer port 1 (bench G2 27/11: copies 86 -> 36 MB a frame, +5 % fps)
-    ("VICTORY_PORT_CONSTANTS", "1"),
+    // v12: every written descriptor slot passed on in the same frame (Yaekai's 8 GB caps: black textures)
+    ("VICTORY_HEAP_CHANGED_MAX", "0"),
+    ("VICTORY_HEAP_PASS_MAX", "0"),
     // Picture
     ("VICTORY_BAKE_TEXTURES_MS", "10000"),
     ("VICTORY_PLANE_NOW", "1"),
-    // Op-lite bc264a4: freezes, static-sampler pipelines, draw set-up
-    ("VICTORY_SOFT_VIEWS", "copies"),
-    ("VICTORY_SAMPLERS_MADE", "1"),
-    ("VICTORY_TABLE_NAMED_ONLY", "1"),
-    ("VICTORY_QUEUE_MARKS", "1"),
+    // v12: LIST_HOLD, WINDOWS_BAR_MB, PORT_CONSTANTS, SOFT_VIEWS, SAMPLERS_MADE, TABLE_NAMED_ONLY and
+    // QUEUE_MARKS left off (real play 27/11: T-pose and black textures with them on, clean without)
 ];
 
 /// Sets the launcher's settings for a bare start. Call first in `main`, before any thread.

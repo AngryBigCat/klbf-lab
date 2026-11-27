@@ -1,18 +1,22 @@
 # KLBF Lab — AMD beta (branch `beta-amd`)
 
-**Beta v11 (2026-11-27).** Based on [Op-lite/victory-scarlett](https://github.com/Op-lite/victory-scarlett) (itself on
-codec-d/cool_fox), plus our changes.
+**Beta v12 (2026-11-27).** Based on [Op-lite/victory-scarlett](https://github.com/Op-lite/victory-scarlett) (itself on
+codec-d/cool_fox), plus our changes. v11, published earlier the same day, was pulled after an hour (characters in a
+T-pose, black textures in real play); v12 is the same code with the settings behind that left off.
 
-New in v11:
+New since the first beta:
 
-- Op-lite's latest work merged (`835ca60`, `bc264a4`: freeze fix, static-sampler pipelines, launcher defaults)
-- [Yaekai/victory-scarlett-3070](https://github.com/Yaekai/victory-scarlett-3070) merged (VRAM eviction, heap cap, visual fixes)
-- renderer port 1, ported from [Paradoxo321/rodrion-vi](https://github.com/Paradoxo321/rodrion-vi) (after Belobug and
-  gleaf-6): the title's 32-bit graphics heap is read by the card in place, so half the copies per frame are gone
+- Op-lite's latest work merged (`835ca60`, `bc264a4`)
+- [Yaekai/victory-scarlett-3070](https://github.com/Yaekai/victory-scarlett-3070) merged (lighting fix for magenta
+  skin and more); its 8 GB descriptor caps are lifted (`VICTORY_HEAP_CHANGED_MAX=0`, `VICTORY_HEAP_PASS_MAX=0`)
 - FSR 4 in Series S mode: `-Fsr` (the title's FidelityFX calls go to the PC FidelityFX 2.4 DLLs)
-- DirectX 12 Agility SDK 1.620 (`D3D12\` beside the exe) and GPU upload heaps (`VICTORY_WINDOWS_BAR_MB=1024`): less RAM
+- DirectX 12 Agility SDK 1.620 (`D3D12\` beside the exe)
 - the launcher's settings built into the exe, for launchers that start it bare
-- texture pool index and texture book (off by default, groundwork for less RAM)
+- texture pool index (groundwork for less RAM)
+
+Left off in v12 (one of them caused the T-pose and black textures; being narrowed down): `VICTORY_LIST_HOLD`,
+`VICTORY_WINDOWS_BAR_MB`, `VICTORY_PORT_CONSTANTS`, `VICTORY_SOFT_VIEWS`, `VICTORY_SAMPLERS_MADE`,
+`VICTORY_TABLE_NAMED_ONLY`, `VICTORY_QUEUE_MARKS`.
 
 Kept from the first beta: AMD shader-compiler crash fix (fxceless #1213), foliage fix (Ryuki), optional ambient
 estimate (cool_fox), write-combining skip, descriptor slot fix (fxceless #1324), bench BM-v1, window branding.
@@ -29,13 +33,12 @@ estimate (cool_fox), write-combining skip, descriptor slot fix (fxceless #1324),
 - optional: `$env:KLBF_AMBIENT_EST='1'` before starting, for brighter shade
 - optional: `-Bench` runs the 5-minute BM-v1 bench
 
-**Known issues:** green boats and vehicles, semi-transparent foliage in places, distance-dependent shadow
-flicker, late pop-in. Plan on 32 GB of RAM (about 18 GB used at peak).
+**Known issues:** green boats and vehicles, some semi-transparent trees, shadows of trees flashing at times, late
+pop-in, shaders still compiling during the first sessions. Plan on 32 GB of RAM.
 
 **Measured** (self-measured, RX 9070 XT + Ryzen 7 9800X3D, 32 GB):
 
-- v11, Series S + FSR 4: 60 min in the world without a crash (scripted input, ended by us at 60 min), peak working
-  set 17.8 GB; BM-v1 run and a real play session to come
+- v12, Series X: a real play session with a controller in the open world is under way; figures when it ends
 - first beta (v5), BM-v1, Series X profile: 16.3 fps average, 1 % low 6.2 fps, 4 freezes > 200 ms, 93.9 % of the
   time at 12 fps or more
 

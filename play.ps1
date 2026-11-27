@@ -103,16 +103,16 @@ $set = [ordered]@{
 
     # Draw set-up: table entries done earlier in a list are not done again; an aliased texture's copy follows its
     # source's writes within a list (a stale read in the base)
-    VICTORY_TABLE_MEMO = '1'; VICTORY_LIST_ALIAS_EXACT = '1'; VICTORY_LIST_HOLD = '1'
+    VICTORY_TABLE_MEMO = '1'; VICTORY_LIST_ALIAS_EXACT = '1'
 
-    # (KLBF Lab, bench E 27/11) Up to 1 GB of windows in the card's memory written by the CPU through the bus
-    # (D3D12 GPU upload heaps: Agility SDK + Resizable BAR/SAM; off by itself where the card has none):
-    # 0.8 GB less RAM at the same fps
-    VICTORY_WINDOWS_BAR_MB = '1024'
+    # (KLBF Lab v12, 27/11) Every descriptor slot the title writes is passed on in the same frame (Yaekai's
+    # 8 GB caps left textures black and roads dark on a 16 GB card)
+    VICTORY_HEAP_CHANGED_MAX = '0'; VICTORY_HEAP_PASS_MAX = '0'
 
-    # (KLBF Lab, bench G2 27/11) Renderer port 1: the title's 32-bit graphics heap (its 174 MB ring) read by the
-    # card where the title has it: copies 86 -> 36 MB a frame, +5 % fps
-    VICTORY_PORT_CONSTANTS = '1'
+    # (KLBF Lab v12, 27/11) Left off after a real play session showed characters in a T-pose, black textures
+    # and missing buildings with them on, and a clean picture with them off (one of them is the cause; being
+    # narrowed down): VICTORY_LIST_HOLD, VICTORY_WINDOWS_BAR_MB, VICTORY_PORT_CONSTANTS, VICTORY_SOFT_VIEWS,
+    # VICTORY_SAMPLERS_MADE, VICTORY_TABLE_NAMED_ONLY, VICTORY_QUEUE_MARKS
 
     # Picture: the title's character bake waits up to 10 s for its textures (1.5 s by default), and a draw
     # waits up to 500 ms for a pipeline still being made (above) instead of being dropped after 20 ms
@@ -121,16 +121,6 @@ $set = [ordered]@{
     # Picture: the material-class depth plane is current before the title's tiling pass reads it (the base
     # gave it last frame's)
     VICTORY_PLANE_NOW = '1'
-
-    # (Op-lite bc264a4) Freezes: the views of the title's batch page-mapping copies are mapped only when touched
-    VICTORY_SOFT_VIEWS = 'copies'
-
-    # (Op-lite bc264a4) Picture: pipelines with static samplers are made each run, not loaded from the saved library
-    VICTORY_SAMPLERS_MADE = '1'
-
-    # (Op-lite bc264a4) Draw set-up: only the table slots a program can read; texture-queue notes that change
-    # nothing skip its lock
-    VICTORY_TABLE_NAMED_ONLY = '1'; VICTORY_QUEUE_MARKS = '1'
 }
 if ($Hooks -and -not $NoHooks) {
     # The memory hooks
