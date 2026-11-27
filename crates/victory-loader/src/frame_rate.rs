@@ -48,7 +48,7 @@ pub fn asked_interval_ms() -> Option<f64> {
     let spec = std::env::var("VICTORY_FRAME_INTERVAL_MS").ok()?;
     let ms = parse_interval_ms(&spec);
     if ms.is_none() {
-        eprintln!("VIctory: VICTORY_FRAME_INTERVAL_MS={spec}: expected milliseconds from 0 (no wait) to 1000");
+        eprintln!("KLBF Lab: VICTORY_FRAME_INTERVAL_MS={spec}: expected milliseconds from 0 (no wait) to 1000");
     }
     ms
 }
