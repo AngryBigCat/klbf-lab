@@ -35,8 +35,6 @@ pub struct Texture {
     pub height: u32,
     /// The record's second word (format and category).
     pub kind: u32,
-    /// The tile mode field, `(word0 >> 23) >> 1 & 0xf` (0: 64 KiB `SW_64KB_D`, 1-3: 4 KiB `SW_4KB_S`).
-    pub tile_mode: u8,
 }
 
 #[derive(Debug)]
@@ -105,7 +103,6 @@ impl Pool {
                 width: (w0 & 0x3fff) + 1,
                 height: ((w0 >> 14) & 0x3fff) + 1,
                 kind: w1,
-                tile_mode: (((w0 >> 23) >> 1) & 0xf) as u8,
             });
         }
         if let Some(last) = textures.last_mut() {
@@ -148,7 +145,7 @@ mod tests {
             d[at + 8..at + 12].copy_from_slice(&page.to_le_bytes());
         };
         rec(etpf + 16, 31 | 31 << 14, 1, &mut d); // 32 × 32, chunk 0
-        rec(etpf + 32, 1023 | 511 << 14 | 2 << 24, 2, &mut d); // 1024 × 512, tile mode 1, chunks 1-2
+        rec(etpf + 32, 1023 | 511 << 14, 2, &mut d); // 1024 × 512, chunks 1-2
         d
     }
 
@@ -161,7 +158,7 @@ mod tests {
         assert_eq!(p.textures.len(), 2);
         assert_eq!((p.textures[0].first_chunk, p.textures[0].chunks), (0, 1));
         assert_eq!((p.textures[1].first_chunk, p.textures[1].chunks), (1, 2));
-        assert_eq!((p.textures[1].width, p.textures[1].height, p.textures[1].tile_mode), (1024, 512, 1));
+        assert_eq!((p.textures[1].width, p.textures[1].height), (1024, 512));
         let data = p.chunks[0].offset;
         assert_eq!(p.at(data), Some((0, 0)));
         assert_eq!(p.at(data + 512), Some((1, 1)));
