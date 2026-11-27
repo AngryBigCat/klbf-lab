@@ -12,6 +12,8 @@
 # -Data        saves (default: %LOCALAPPDATA%\klbf-lab\data)
 # -RayTracing  the title's own ray tracing (VICTORY_BVH_BUILDER=1): better light, much slower. Off by default.
 # -Fsr        Series S mode with AMD FSR 4 (the title's own upscaler, sent to the PC's FSR DLL in -FfxDir).
+# -Bench      KLBF Lab Bench BM-v1 (5 min, hands-off; your morning save in slot 1): Continue pressed for you.
+#              -BenchPlayer <GitHub login> names you on the card (else anonymous).
 # -AutoStart   presses through the start screens by itself, for a fresh start with no save
 # -SkipMovies  skips the opening movies (off by default): all or open (none opens), end (each jumps to its
 #              last frame), fast (decoded without waiting). VICTORY_SKIP_MOVIES, by zocram4cc.
@@ -41,6 +43,8 @@ param(
     [switch]$Fsr,
     [string]$FfxDir = 'D:\KLBF-Lab\ffx-2.4\Kits\FidelityFX\signedbin',
     [switch]$AutoStart,
+    [switch]$Bench,
+    [string]$BenchPlayer = 'anonymous',
     [ValidateSet('open', 'end', 'fast', 'all')][string]$SkipMovies = '',
     [switch]$NoProbeRays,
     [switch]$ProbeRays,
@@ -119,6 +123,15 @@ if ($AutoStart) {
     $set.VICTORY_AUTO_INPUT = 'd>=15,rep(A,1,d<10),w3,d>=20,w1,rep(A,1,d>=35),w1.5,Down,w7,Down,w0.6,A,w1.5,A,w0.7,Down,w0.5,A,w0.7,Down,w0.5,A'
 }
 if ($SkipMovies) { $set.VICTORY_SKIP_MOVIES = $(if ($SkipMovies -eq 'all') { 'open' } else { $SkipMovies }) }
+# -Bench (KLBF Lab Bench BM-v1, docs/klbf/BENCH-BM-V1.md): the bench on, the movies skipped, and the start
+# screens and Continue pressed by themselves (your morning save in slot 1 must be the last one); touch nothing.
+if ($Bench) {
+    $env:KLBF_BENCH = 'bm-v1'; $env:KLBF_BENCH_PLAYER = $BenchPlayer
+    if (-not $SkipMovies) { $set.VICTORY_SKIP_MOVIES = 'end' }
+    $set.VICTORY_AUTO_INPUT = 'rep(A,2,d>=15),rep(A,1,d<10),w3,d>=20,w1,rep(A,1,d>=35),w1.5,Down,w7,Down,w0.6,A,w2,A,w1.5,A,d>=1000'
+    Write-Host 'KLBF Lab Bench BM-v1: Continue is pressed for you, then touch nothing for 5 minutes. Your card is saved in bench-results beside victory.exe;'
+    Write-Host 'post it with the form: https://github.com/PastiiJay/klbf-lab/issues/new?template=bench-bm-v1.yml'
+}
 foreach ($k in $More.Keys) { $set[$k] = [string]$More[$k] }
 foreach ($k in $set.Keys) { Set-Item -Path "Env:$k" -Value $set[$k] }
 
