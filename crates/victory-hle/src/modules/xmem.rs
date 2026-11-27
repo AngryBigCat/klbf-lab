@@ -2937,7 +2937,16 @@ mod tex_trim {
                 // leaves RAM too, and comes back when read.
                 let mut at: Vec<usize> = Vec::new();
                 {
-                    let physical = super::physical();
+                    // (27/11, bench F: worse 1% lows) Never make the title's mapping calls wait: the lock only if
+                    // it is free, else this piece waits for the next pass.
+                    let physical = match super::PHYSICAL.try_lock() {
+                        Ok(p) => p,
+                        Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+                        Err(std::sync::TryLockError::WouldBlock) => {
+                            COUNTS[2].fetch_add(1, Relaxed);
+                            continue;
+                        }
+                    };
                     let shown = super::SHOWN.read().unwrap_or_else(|e| e.into_inner());
                     for &(start, len, serial) in piece {
                         let (start, end) = (start as usize, (start + len) as usize);
