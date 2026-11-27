@@ -1588,10 +1588,14 @@ fn arrange(base: usize, pages: &[usize]) {
     let mut owner: HashMap<usize, usize> =
         table.pages.iter().filter(|(_, s)| Arc::ptr_eq(&s.section, &section)).map(|(&n, s)| (s.index, n)).collect();
     let mut moved = 0u64;
-    for (n, have_then, want) in plan {
-        // As read above, else the table changed meanwhile: left as it is.
+    for (n, _, want) in plan {
+        // Where it is now: an earlier swap of this same loop may have moved it (bench G, 27/11: 896 pages left
+        // out of order when this compared with the plan's first reading). Fresh as found above, or left.
         let Some(have) = table.pages.get(&n).map(|s| s.index) else { continue };
-        if have != have_then || !fresh.contains(&have) || !fresh.contains(&want) {
+        if have == want {
+            continue;
+        }
+        if !fresh.contains(&have) || !fresh.contains(&want) {
             ARRANGED[1].fetch_add(1, Ordering::Relaxed);
             continue;
         }
