@@ -2774,7 +2774,13 @@ mod tex_trim {
     fn on() -> bool {
         static ON: OnceLock<bool> = OnceLock::new();
         *ON.get_or_init(|| {
-            let on = std::env::var_os("KLBF_TEX_TRIM").is_some_and(|v| v == "1");
+            let asked = std::env::var_os("KLBF_TEX_TRIM").is_some_and(|v| v == "1");
+            // (27/11, bench B) Without VICTORY_GPU_ONLY=1 our layer watches and compares GPU-only pages too and
+            // reads them straight back: 21 GB taken out for 1.8 GB of candidates, worse 1% lows. Refused then.
+            let on = asked && victory_gpu::pagekinds::gpu_only_mode() == 1;
+            if asked && !on {
+                tracing::warn!("KLBF_TEX_TRIM refused: it needs VICTORY_GPU_ONLY=1 (otherwise our own checks read the pages back)");
+            }
             tracing::info!(on, "KLBF_TEX_TRIM: GPU-only pool pages of textures already on the card are taken out of RAM (no byte lost) while free RAM is short");
             on
         })
