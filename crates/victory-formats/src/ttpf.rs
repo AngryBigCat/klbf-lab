@@ -1,6 +1,6 @@
 //! (Plan GPU, stage 1) The index of an RDS5 texture pool (`.ttpf`): its chunks and its ETPF texture
 //! records, read from the head of the file alone. Layout as measured on all 57 pools of the retail
-//! title (Leonida-forge `docs/textures.md`, `tools/ttpf_mips.py` `Pool`):
+//! title (community format notes):
 //!
 //! - `RDS5` at 0, entry count `n` at 4 (u32), virtual size in the low 56 bits at 8 (top byte 22);
 //! - the chunk table at 0x18, `n - 1` u64 (the last is a sentinel), `n - 2` chunks;
@@ -167,7 +167,7 @@ mod tests {
     }
 }
 
-/// (Run by hand, the game's pools needed) `KLBF_TTPF_DIR=D:\Leonida cargo test -p victory-formats -- --ignored`:
+/// (Run by hand, the game's pools needed) `KLBF_TTPF_DIR=C:\Games\Title cargo test -p victory-formats -- --ignored`:
 /// every pool under the folder reads, and every chunk is found again by its offset.
 #[cfg(test)]
 #[test]
