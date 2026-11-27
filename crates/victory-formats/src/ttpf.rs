@@ -131,7 +131,7 @@ mod tests {
         let mut d = vec![0u8; data + 3 * 256];
         d[..4].copy_from_slice(b"RDS5");
         d[4..8].copy_from_slice(&(n as u32).to_le_bytes());
-        d[8..16].copy_from_slice(&((22u64 << 56) | 4 * 4096).to_le_bytes());
+        d[8..16].copy_from_slice(&((22u64 << 56) | (4 * 4096)).to_le_bytes());
         let e = |phys: usize, virt: u64, codec: u64| ((phys as u64 / 256) | codec << 26 | (virt / 4096) << 30).to_le_bytes();
         for (i, (p, v, c)) in [(data, 4096, 8), (data + 256, 2 * 4096, 8), (data + 512, 3 * 4096, 1), (data + 768, 4 * 4096, 0)].into_iter().enumerate() {
             d[0x18 + i * 8..0x20 + i * 8].copy_from_slice(&e(p, v, c));
