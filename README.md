@@ -36,6 +36,19 @@ estimate (cool_fox), write-combining skip, descriptor slot fix (fxceless #1324),
 **Known issues:** green boats and vehicles, some semi-transparent trees, shadows of trees flashing at times, late
 pop-in, shaders still compiling during the first sessions. Plan on 32 GB of RAM.
 
+**Quick fixes while we work on the next build** (each one found or confirmed by a tester; add it to the end of
+your `play.ps1` line):
+
+| Problem | Card / system | Add | Thanks to |
+|---|---|---|---|
+| Device lost / removed after a few minutes | RX 6000 (RDNA 2) | `-More @{ VICTORY_RELAY = '0' }` (stable, slower; a real fix is being ported) | ParaNyx, BlackBu7let, a15106479638-hub |
+| Faces or skin missing | RX 9000 (RDNA 4) | `-More @{ VICTORY_HALF_VIEWS = '0' }` | clems206 |
+| About 2 fps, "compiling" never ends (ray tracing on Proton) | Linux / Proton | `-More @{ VICTORY_PIPELINE_WAIT_MS = '0' }` | Exorion1er |
+| GPU fault on Wine / RADV | Linux | `-More @{ VICTORY_POOL_DISCARD = '0' }` | YaBulochka |
+| Out of memory with 16 GB of RAM | any | Windows pagefile of 32 GB or more, close other programs | |
+
+Several at once go in one `-More`: `-More @{ VICTORY_RELAY = '0'; VICTORY_HALF_VIEWS = '0' }`.
+
 **Measured** (self-measured, RX 9070 XT + Ryzen 7 9800X3D, 32 GB):
 
 - v12, Series X: a real play session with a controller in the open world is under way; figures when it ends
