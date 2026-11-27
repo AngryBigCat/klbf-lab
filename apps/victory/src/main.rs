@@ -5,6 +5,7 @@
 
 mod census;
 mod inspect;
+mod klbf_defaults; // KLBF Lab: the launcher's settings for bare starts
 #[cfg(all(windows, feature = "diagnostics"))]
 mod replay;
 mod run;
@@ -167,7 +168,30 @@ enum Console {
     SeriesS,
 }
 
+/// (KLBF Lab, from our Neptune base) The redistributable D3D12 runtime (Agility SDK) in `D3D12\`
+/// beside the executable (`build.rs` exports these two; the version is the middle number of the
+/// package's, 1.620.2). Without the folder, Windows' own D3D12 runs.
+#[cfg(windows)]
+#[unsafe(no_mangle)]
+#[used]
+pub static D3D12SDKVersion: u32 = 620;
+
+#[cfg(windows)]
+#[repr(transparent)]
+pub struct SdkPath(*const u8);
+// SAFETY: a pointer to a constant string.
+#[cfg(windows)]
+unsafe impl Sync for SdkPath {}
+
+#[cfg(windows)]
+#[unsafe(no_mangle)]
+#[used]
+#[allow(clippy::manual_c_str_literals)] // exported as bytes, not as a `c_char` string
+pub static D3D12SDKPath: SdkPath = SdkPath(b".\\D3D12\\\0".as_ptr());
+
 fn main() -> Result<()> {
+    // (KLBF Lab) Before anything reads a setting or starts a thread.
+    klbf_defaults::apply();
     victory_core::logging::init("info");
     // The audio recorder `run` starts for `VICTORY_AUDIO_CAPTURE`.
     #[cfg(all(windows, feature = "diagnostics"))]

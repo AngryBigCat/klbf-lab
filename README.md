@@ -1,15 +1,25 @@
 # KLBF Lab — AMD beta (branch `beta-amd`)
 
-**Beta.** Based on [Op-lite/victory-scarlett](https://github.com/Op-lite/victory-scarlett) (itself on
-codec-d/cool_fox), plus our changes:
+**Beta v12 (2026-11-27).** Based on [Op-lite/victory-scarlett](https://github.com/Op-lite/victory-scarlett) (itself on
+codec-d/cool_fox), plus our changes. v11, published earlier the same day, was pulled after an hour (characters in a
+T-pose, black textures in real play); v12 is the same code with the settings behind that left off.
 
-- AMD shader-compiler crash fix (fxceless #1213)
-- foliage fix (Ryuki)
-- optional ambient estimate (cool_fox), off by default
-- write-combining skip
-- descriptor slot fix (fxceless #1324)
-- bench BM-v1
-- window branding
+New since the first beta:
+
+- Op-lite's latest work merged (`835ca60`, `bc264a4`)
+- [Yaekai/victory-scarlett-3070](https://github.com/Yaekai/victory-scarlett-3070) merged (lighting fix for magenta
+  skin and more); its 8 GB descriptor caps are lifted (`VICTORY_HEAP_CHANGED_MAX=0`, `VICTORY_HEAP_PASS_MAX=0`)
+- FSR 4 in Series S mode: `-Fsr` (the title's FidelityFX calls go to the PC FidelityFX 2.4 DLLs)
+- DirectX 12 Agility SDK 1.620 (`D3D12\` beside the exe)
+- the launcher's settings built into the exe, for launchers that start it bare
+- texture pool index (groundwork for less RAM)
+
+Left off in v12 (one of them caused the T-pose and black textures; being narrowed down): `VICTORY_LIST_HOLD`,
+`VICTORY_WINDOWS_BAR_MB`, `VICTORY_PORT_CONSTANTS`, `VICTORY_SOFT_VIEWS`, `VICTORY_SAMPLERS_MADE`,
+`VICTORY_TABLE_NAMED_ONLY`, `VICTORY_QUEUE_MARKS`.
+
+Kept from the first beta: AMD shader-compiler crash fix (fxceless #1213), foliage fix (Ryuki), optional ambient
+estimate (cool_fox), write-combining skip, descriptor slot fix (fxceless #1324), bench BM-v1, window branding.
 
 **How to run** (your own dump of the title is needed; nothing of the title is in this repository):
 
@@ -17,15 +27,20 @@ codec-d/cool_fox), plus our changes:
 .\play.ps1 -Game 'D:\Path\To\YourDump'
 ```
 
+- Series X profile by default
+- optional: `-Fsr -FfxDir 'D:\Path\To\FidelityFX\signedbin'` for Series S + FSR 4 (faster)
 - optional: `-SkipMovies end` skips the opening movies
 - optional: `$env:KLBF_AMBIENT_EST='1'` before starting, for brighter shade
-- Series X profile by default
+- optional: `-Bench` runs the 5-minute BM-v1 bench
 
-**Known issues:** green boats and vehicles, semi-transparent foliage in places, distance-dependent shadow
-flicker, late pop-in.
+**Known issues:** green boats and vehicles, some semi-transparent trees, shadows of trees flashing at times, late
+pop-in, shaders still compiling during the first sessions. Plan on 32 GB of RAM.
 
-**Measured** (BM-v1, self-measured, RX 9070 XT + Ryzen 7 9800X3D, Series X profile): 16.3 fps average,
-1 % low 6.2 fps, 4 freezes > 200 ms, 93.9 % of the time at 12 fps or more.
+**Measured** (self-measured, RX 9070 XT + Ryzen 7 9800X3D, 32 GB):
+
+- v12, Series X: a real play session with a controller in the open world is under way; figures when it ends
+- first beta (v5), BM-v1, Series X profile: 16.3 fps average, 1 % low 6.2 fps, 4 freezes > 200 ms, 93.9 % of the
+  time at 12 fps or more
 
 All upstream credits and the licence below are kept unchanged.
 
@@ -48,12 +63,25 @@ no game files, code or assets.**
 3. **Start the game.** Drag your game folder onto **`Play-Scarlett.cmd`**.
    After the first time, just double-click `Play-Scarlett.cmd`: it remembers the folder.
 
-That is all. `Play-Scarlett.cmd` sets every setting and memory hook this branch is measured with, in Series X mode.
+That is all. `Play-Scarlett.cmd` sets every setting this branch runs with, in Series X mode. The first start
+takes a few extra minutes while it prepares the game's shaders (see below); after that it starts straight away.
 
 Good to know:
 
-- **The first start is slow** and can show missing faces: the game's shaders are translated once and kept. From the
-  second start on it is right.
+- **Shaders are prepared ahead, by itself.** Before the game starts, the launcher translates all of the game's
+  shaders once (`victory.exe shaders <your game folder>\shaders.rpf`). You will see a console window counting
+  for a few minutes. It happens only when it is needed:
+  - on the first start,
+  - after you build a new `victory.exe`,
+  - after you change a setting that changes the shaders (`-RayTracing`, `-NoProbeRays`).
+
+  It is remembered in the cache folder (`scarlett-shaders-ahead.txt`), so every other start skips it. Without
+  this step the game would translate shaders while you play: slow, with objects missing and faces drawn wrong
+  for that session. To run only this step: `.\scripts\play-scarlett.ps1 -OnlyPrecompile`. To skip it:
+  `-NoPrecompile`. To force it again, delete `scarlett-shaders-ahead.txt` from the cache folder
+  (`%LOCALAPPDATA%\victory-scarlett\cache` unless you chose another).
+- **The first session still stutters a little** while the graphics driver builds its own pipelines; later
+  sessions are smoother.
 - **Controls:** an Xbox controller works. On the keyboard: W A S D move, I J K L camera, Enter = A, Backspace = B,
   X and Y, Z / C = left / right trigger, Q / E = LB / RB, arrows = D-pad, Esc = Menu, Tab = View.
 - **Do not use `Play-VIctory.cmd`** for this: that is the base's launcher, with Series S and other settings.
@@ -63,7 +91,10 @@ Good to know:
   .\scripts\play-scarlett.ps1 -RayTracing
   ```
 
-- **Something looks wrong?** Try without the memory hooks: `.\scripts\play-scarlett.ps1 -NoHooks`
+- **The violet glow on bushes, trees and palms** that the base shows with ray tracing off is gone by default
+  (`-NoProbeRays` brings the base's picture back). The first start after this update re-translates shaders.
+- **More speed:** `.\scripts\play-scarlett.ps1 -Hooks` turns the memory hooks on (about 10-15 ms a frame less in
+  the opening scenes). They are off by default: they can show a few small textures with old contents for a moment.
 - More options are listed at the top of `scripts\play-scarlett.ps1` (other cache or save folders, a release build,
   automatic start-screen presses, any single setting through `-More`).
 
@@ -73,17 +104,17 @@ This branch is codec-d/cool_fox at `f4b48ad` (itself avatarmanz/VIctory-7900XTX 
 work of a local fork ("Scarlett") ported onto it. Target PC: Ryzen 7 9800X3D, 32 GB RAM, RTX 4080 SUPER 16 GB,
 2560x1440, Series X mode. Goal: a stable 30 frames a second with no loss of picture. It is not there yet.
 
-## Measured (6-minute opening route, diagnostics build, ray tracing off)
+## Measured (6-minute opening route, diagnostics build, ray tracing off, hooks off)
 
 | | cool_fox as it was (floor) | this branch, current settings |
 |---|---|---|
-| ms per frame, 1,000-2,500 draws | 50-55 | 35 |
-| ms per frame, 2,500-4,000 draws | 50-53 | 44 |
-| ms per frame, over 4,000 draws | 59-66 | 56 |
-| frames over 1.5x the usual | 7-8 % | 2.3 % |
-| 5-second periods with a frame over 500 ms | 18-21 | 10 |
-| frames drawn in the 6 minutes | 4,400-5,900 | 8,385 |
-| texture copies made again in the first 4 minutes | about 6.4 GB | 14 MB |
+| ms per frame, 1,000-2,500 draws | 50-55 | 34-35 |
+| ms per frame, 2,500-4,000 draws | 50-53 | 38-41 |
+| ms per frame, over 4,000 draws | 59-66 | 46-49 |
+| frames over 1.5x the usual | 7-8 % | 0.8 % |
+| 5-second periods with a frame over 500 ms | 18-21 | 3 |
+| frames drawn in the 6 minutes | 4,400-5,900 | 8,300-9,400 |
+| texture copies made again in the first 4 minutes | about 6.4 GB | under 15 MB |
 | memory commit, peak | 37 GB | 33 GB |
 
 Heavier hand-played scenes (a prison yard at 5,500-8,600 draws, the open world) run at about 48-62 ms a frame
@@ -103,14 +134,28 @@ All settings are environment variables read at start; `scripts\play-scarlett.ps1
 - `VICTORY_LEVELS_ON_DEMAND=0`: textures keep only the levels their views show. cool_fox's launcher set it to 1,
   which made every texture keep its whole chain on the card. Off: re-uploads near zero, about 4 GB less commit,
   fewer freezes. This was the largest single gain.
-- The memory hooks (`-NoHooks` starts without them).
+- The memory hooks, only with `-Hooks` (see "The memory hooks" below).
 - `VICTORY_POOL_DISCARD=1`, `VICTORY_FILL_TITLE=1`, `VICTORY_PARTIAL_DELTA=1`, `VICTORY_BAKE_DELTA=1`,
   `VICTORY_MAP_LOCK_FINE=1`, `VICTORY_POOL_CAP=1`: unused pool pages given back under low RAM, no read waits for
   fills, unchanged texture levels not uploaded again, the mapping lock taken per range, the texture pool capped.
 - `VICTORY_TABLE_MEMO=1`: a descriptor-table entry made ready earlier in a command list is not made ready again
   (81 % of about 54,000 entries a frame; verified against the full path). `VICTORY_LIST_ALIAS_EXACT=1`: a texture
   read through a view in another format follows its source's writes within a list (the base read a stale copy once
-  a frame in the title's lighting filter).
+  a frame in the title's lighting filter). `VICTORY_LIST_HOLD=1`: a view copied into a new table is held once
+  per list, not once per slot.
+- Picture waits: `VICTORY_BAKE_TEXTURES_MS=10000` (the title's character bake waits up to 10 s for its textures;
+  1.5 s by default: faces and skin came out wrong in some runs) and `VICTORY_PIPELINE_WAIT_MS=500` (a draw waits
+  for a pipeline still being made instead of being dropped after 20 ms).
+
+- `VICTORY_SOFT_VIEWS=copies` (the freeze fix): the views made by the title's batch page-mapping copies are
+  kept in the layer's books and mapped only if something touches them (the title's CPU never did in 6 minutes).
+  Tens of thousands of map and unmap system calls a second are spared at loads: long frames 2.7 % -> 0.8 %,
+  5-second periods with a freeze 10-12 -> 3. Its check mode (`=verify`) found no differing page.
+- `VICTORY_SAMPLERS_MADE=1`: pipelines with static samplers are not loaded from the saved pipeline library, where
+  they could sample through another run's samplers (wrong light or faces in some runs only). They are compiled
+  each run instead. `VICTORY_TABLE_NAMED_ONLY=1`: a new descriptor table gets only the slots its program can read
+  (about 27,000 slots a frame less; check mode found none missing). `VICTORY_QUEUE_MARKS=1`: texture-queue notes
+  that change nothing leave its lock alone (about 14,000 a frame).
 
 ## What was added to cool_fox
 
@@ -143,25 +188,112 @@ described above. Others:
   `VICTORY_SHADER_LOOP_LIMIT=1024` (black faces), `VICTORY_BVH_COUNT32` (breaks ray tracing), `VICTORY_UNMAP_EXACT`,
   `VICTORY_TEXTURE_RAM_CAPS=0`, `VICTORY_VRAM_RAW_PCT`.
 
+## The memory hooks: what they are and how they work
+
+The console title keeps textures, vertex data and constants in memory that it writes itself, and the layer keeps
+a copy of every range on the PC's card. Each frame the layer must know which pages the title wrote since the
+copy was taken. Without hooks it asks about all of them: Windows write-watch on some regions and read-only
+"guard" pages (a write faults once, is noted, and the page opens) on the rest. That asking and re-arming is a
+large part of the layer's CPU time. The hooks use what the title itself tells us to ask less. Both are off by
+default (`-Hooks` turns them on) and both are source in this repository; nothing of the title's is included,
+they only name addresses inside the user's own copy of the program and check a few bytes there before attaching.
+
+**`VICTORY_GPU_ONLY`** (`crates/victory-hle/src/modules/pagekinds.rs`, `crates/victory-gpu/src/pagekinds.rs`).
+The title keeps its own table of what each 64 KiB page is mapped for: the CPU, the card, or both. The hook
+attaches to the title's page-mapping call, reads that table, and keeps a journal of every event that can change
+a card-only page: our own DirectStorage writes into it, mapping changes, a texture level allocation, a block
+entering or leaving the rule. A range lying wholly on card-only pages is then answered from the journal: no
+write-watch ask, no guard, no fault. `=verify` tracks as before and counts every write the rule would have
+missed; with `=1` a safety net compares texture copies and counts stale ones.
+State: not safe yet. 6-minute runs still find 4-11 small textures (8-12 KiB) drawn with old contents. The
+title maps such a page at a second address and writes through that view; taking blocks off the rule at the
+moment a second view is mapped did not close it. Until both counts are 0 it stays off.
+
+**`VICTORY_KNOWN_WRITES`** (`crates/victory-hle/src/lockhook.rs`, `crates/victory-gpu/src/knownwrites.rs`).
+The hook attaches to the title's buffer lock and unlock calls, so the layer learns the windows in which the
+title writes a buffer; with the layer's own writes (landings, copy steps, copy-backs) that is a ledger of
+"written, by a known event". A page covered by events and not marked since its copy was taken is not asked
+about at all. First form: 300-400 MB a frame spared, but it drew stale data in streaming regions, where the
+title remaps pages through the card's view and no lock call tells us. With the rule narrowed to what is safe it
+spares 1.7 MB a frame. Retired: kept in the source, off, not worth turning on.
+
+How the two compose when both are on, per refresh of a buffer copy: pages the ledger covers are spared first;
+of the rest, runs wholly on card-only pages are answered from the journal; everything else goes to write-watch
+and guards as without hooks. Every journal note also marks the ledger, so neither can spare a page the other
+calls written. `tools/docs/fox-merge-hooks.md` has the full composition and the always-on additions;
+`tools/docs/pc-like-memory.md` the wider plan they belong to.
+
+Related, not a hook: **`VICTORY_SOFT_VIEWS=copies`** (in the launcher) uses the same knowledge the other way
+round. The views the title's batch page-mapping copies create for the card are never read by its CPU, so they
+are kept in the layer's books and mapped only on a touch (a fault maps the view and retries).
+
+## Everything done on this branch, in order
+
+1. **Base and measuring.** Moved from the older tree (branch `scarlett`) to cool_fox; unattended runs with a
+   watchdog, scripted start-screen input, frame logs by thread, a fixed 6-minute route and a floor to compare
+   against, so every change is one run against a known base instead of an A/B pair.
+2. **Texture memory.** `VICTORY_LEVELS_ON_DEMAND=0` (the base launcher kept every texture's whole chain):
+   re-uploads 6.4 GB -> under 15 MB, about 4 GB less commit. Bake and partial deltas, pool cap, pool discard
+   under low RAM, fills that do not wait for reads, the mapping lock per range.
+3. **Draw set-up.** Table memo (81 % of entries not rebuilt), list hold, named-only table slots, texture-queue
+   marks. Tried without gain: same-bind filter, list batching, cross-frame table reuse, `VICTORY_THIN`.
+4. **Submitting thread.** Refresh split meters; exact stale-refresh path; one guard pass per submission and a
+   "hot block" rest (both measured and dropped: no gain); card copies from a touched list (no gain shown).
+   Found: two thirds of the guard time is waiting for one lock, and the title's threads wait on it too
+   (7-20 ms a frame summed). A lock change was written locally but is NOT in this branch: its stress test
+   counted missed writes on the unchanged path as well, which is not understood yet.
+5. **Freezes.** Cause found by elimination (not our locks, page faults, protection changes or address-space
+   queries): the title's page-mapping copies, one map and unmap per 64 KiB page, slow under memory pressure.
+   Memory trims did not help; `VICTORY_SOFT_VIEWS=copies` did (freeze periods 10-12 -> 3 in 6 minutes).
+   A page mover for the texture pool lost the device four times and is parked.
+6. **Picture.** Violet vegetation with ray tracing off (`VICTORY_PROBE_RAYS`); a stale alias read in the
+   lighting filter (`VICTORY_LIST_ALIAS_EXACT`); a stale material-class plane (`VICTORY_PLANE_NOW`); bakes and
+   pipelines waited for; static-sampler pipelines kept out of the pipeline library (`VICTORY_SAMPLERS_MADE`);
+   a use-after-free crash in a meter; a shader-cache key that missed new translator switches. NaN sources
+   traced to two compute passes: both translate as the console computes them, the open question is their inputs.
+7. **Ray tracing.** Works with `-RayTracing` but costs about 84 ms of card time a frame; parked until 30 fps
+   holds without it.
+8. **Hooks.** See above: one retired, one not yet safe.
+9. **Other forks read for ideas** (source only, nothing of theirs built or run): cool_fox-willy, two NVIDIA
+   forks, foxhound. Notes in `tools/docs/*-review.md`.
+
+Still open: 30 fps in heavy scenes (20-21 fps in the prison, lower when driving), the guards' lock, the title's
+own mapping calls, lingering purple patches, meshes stretching for a moment, the hooks.
+
 ## Known problems
 
-- Bushes and some trees glow purple; purple patches linger for a few seconds in some scenes (present in the base;
-  cause not found: `tools/docs/left-out-audit.md` lists the candidates).
-- Meshes can stretch for a second or two in busy scenes (seen before today's changes; another fork blames
-  `VICTORY_RELAY=2` with `VICTORY_CARD_STEPS=2`; not yet tested here).
-- Ray tracing is off by default: the base leaves the title's ray passes out unless `VICTORY_BVH_BUILDER=1`
-  (`CS_RaytracingResolve`, about 1,000 programs, and `CS_ScreenProbes_ActivateRays`). Those are all of the draws the
-  log reports as dropped. With it on the picture is sharper and better lit, and the card needs about 84 ms a frame
-  (`tools/docs/rt-parked-T.md`).
-- Heavy scenes sit at 16-21 fps: the layer's submitting thread is the limit (see above).
+- Fixed by default: the violet glow on bushes, trees and palms and the bright blue awnings with ray tracing off.
+  The base leaves out the title's probe-activation program, and the light probes then keep whatever their
+  memory held. `VICTORY_PROBE_RAYS=1` (set by the launcher) runs it and answers every ray test as for an empty
+  structure, so each ray ends with the title's own miss result; no cost measured.
+- Purple patches can linger for a few seconds in some scenes; magenta or blue streaks, shiny skin or a dark band
+  across the eyes appear on characters in some runs. Candidates and evidence: `tools/docs/shading-gaps-audit.md`
+  (a material-class depth plane was read before it was current, once a frame: fixed by `VICTORY_PLANE_NOW=1`,
+  set by the launcher; two compute passes make NaNs: ambient occlusion and a far-depth downsample, being traced).
+- Freezes at scene loads are much rarer with `VICTORY_SOFT_VIEWS=copies` (in the launcher), not gone: the
+  title's own direct mapping calls still map every page, and all of it gets slower when free RAM falls under
+  about 3 GB (the title and the layer commit 31-34 GB). Close other programs before playing on a 32 GB PC.
+  `tools/docs/freeze-analysis.md`.
+- The memory hooks (`-Hooks`) can draw a few small textures with old contents until their own check catches it
+  (4-11 in a 6-minute run; the title writes the pages through a second view). Off by default until fixed.
+- Heavy scenes sit at 16-21 fps, and driving in the open world drops lower (50-90 ms a frame at 9-12 thousand
+  draws): there the title's five recording threads are the limit, each bind costing about 22 us in the layer.
+  On lighter scenes the layer's submitting thread is the limit (`VICTORY_REFRESH_STALE=1` is verified exact but
+  gains no time yet).
+- Meshes can stretch for a second or two in busy scenes (cause not found).
+- Ray tracing (`-RayTracing`) is off by default: sharper and better lit, but the card then needs about 84 ms a
+  frame (`tools/docs/rt-parked-T.md`).
 - Texture pop-in remains, less than before; the card reaches 14-15 GB of 16 in long sessions.
-- A first run on an empty shader cache can show missing or black faces.
+- Started without the launcher (or with `-NoPrecompile`) on an empty shader cache, a first run can show missing
+  or black faces; the launcher's prepare-ahead step avoids that.
 - In Series X mode the title always renders at 2560x1440 and upscales to 3840x2160 itself.
 - Two pipeline creation methods are not implemented (the title falls back to ordinary containers).
+- Fixed since the last state: a crash (a use after free in a meter thread that runs with the hooks).
 
 ## Where things are
 
 - `Play-Scarlett.cmd`, `scripts/play-scarlett.ps1`: the launcher.
+- `tools/docs/picture-settings-checklist.md`: every picture setting against another cool_fox build's.
 - `tools/`: the measuring scripts (`run-auto-coolfox.sh`: hands-off run with watchdog; `run-compare.sh`,
   `run-freezes.sh`, `run-focus.sh`), notes (`tools/docs`: what was measured, tried and rejected; `fox-port-*.md` list
   every ported switch; `cool-fox-willy-review.md` and `left-out-audit.md`: a settings audit and what the layer

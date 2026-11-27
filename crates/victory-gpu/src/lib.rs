@@ -17,6 +17,9 @@
 
 #[cfg(windows)]
 mod ambient;
+pub mod external; // KLBF Lab: FSR port (VICTORY_FSR_DLL)
+#[cfg(windows)]
+mod port; // KLBF Lab: renderer port 1 (VICTORY_PORT_CONSTANTS, from rodrion-vi)
 #[cfg(windows)]
 pub mod klbf_bench; // KLBF Lab Bench BM-v1 (PastiiJay/klbf-lab)
 #[cfg(windows)]
@@ -88,6 +91,11 @@ pub mod shader_cache;
 mod memory;
 #[cfg(windows)]
 mod shadow;
+// (Fox T) VICTORY_REFRESH_STALE=verify: the stale-page refresh's verify harness (W's hook calls it)
+mod stalecheck;
+// (Fox T) VICTORY_NAN_METER=1: NaNs and infinities counted per program where they are stored
+#[cfg(feature = "diagnostics")]
+mod nanmeter;
 #[cfg(windows)]
 mod tiles;
 pub mod signature;
@@ -140,6 +148,12 @@ pub use inplace::{title_memory_freeing, title_memory_section, title_memory_secti
 pub use watch::{
     kernel_writing, title_memory_allocated, title_memory_freed, title_memory_reading, title_memory_remapped,
     Remapping, title_memory_remapping, title_memory_remapping_in, remap_notes_take, title_memory_splitting, title_memory_unmapping, title_memory_written,
+};
+// (V2, `VICTORY_SOFT_VIEWS`) Views of the page-mapping copies kept in the runtime's books alone.
+#[cfg(windows)]
+pub use watch::{
+    SOFT_BY_OUR_FAULT, SOFT_BY_OUR_WRITE, SOFT_BY_TITLE_CALL, SOFT_BY_TITLE_FAULT, SoftViews, soft_make_real, soft_view_counts,
+    soft_view_gone, soft_view_noted, soft_view_real, soft_view_would, use_soft_views,
 };
 #[cfg(windows)]
 pub use lockmeter::kernel_will_write; // (coder H) watch::writing, noted for the F23 meter first
