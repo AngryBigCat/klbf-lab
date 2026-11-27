@@ -50,6 +50,16 @@ pub(crate) fn on_wine() -> bool {
 /// Standard memory the title has handed to the system.
 static TRANSFERRED: AtomicUsize = AtomicUsize::new(0);
 
+/// Bytes of physical pages the title holds (`XMemAllocatePhysicalPages`
+/// less `XMemFreePhysicalPages`): its own memory, as a console counts it.
+static TITLE_PAGES: AtomicUsize = AtomicUsize::new(0);
+
+fn title_used_is_process() -> bool {
+    static PROCESS: std::sync::LazyLock<bool> =
+        std::sync::LazyLock::new(|| std::env::var("VICTORY_TITLE_USED").is_ok_and(|v| v.trim() == "process"));
+    *PROCESS
+}
+
 // Console additions to the host's flags.
 /// 2 MiB pages; the host reads this bit as large pages, which need a
 /// privilege.
@@ -704,6 +714,7 @@ pub extern "system" fn XMemAllocatePhysicalPages(
         resident: (0..n.div_ceil(64)).map(|_| std::sync::atomic::AtomicU64::new(0)).collect(),
         discarded: (0..n.div_ceil(64)).map(|_| std::sync::atomic::AtomicU64::new(0)).collect(),
     });
+    TITLE_PAGES.fetch_add(size, Ordering::Relaxed);
     let mut table = page_table_mut();
     let first = table.next_page;
     table.next_page += n * FRAMES;
@@ -740,6 +751,8 @@ pub extern "system" fn XMemFreePhysicalPages(n: usize, pages: *const usize) -> B
     // Dropped without the lock: the last page of a section unmaps its window.
     let gone: Vec<Slice> = numbers.iter().filter_map(|number| table.pages.remove(number)).collect();
     drop(table);
+    let freed = gone.len() * PAGE;
+    let _ = TITLE_PAGES.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |held| Some(held.saturating_sub(freed)));
     drop(gone);
     1
 }
@@ -2676,7 +2689,11 @@ pub extern "system" fn XMemGetWorkingSetStatistics(_which: u32, out: *mut Workin
     let (gpu_optimal, standard) = victory_gpu::console::current().title_memory();
     let stats = WorkingSet {
         title_limit: gpu_optimal + standard - TRANSFERRED.load(Ordering::Relaxed),
-        title_used: counters.PagefileUsage,
+        title_used: if title_used_is_process() {
+            counters.PagefileUsage
+        } else {
+            TITLE_PAGES.load(Ordering::Relaxed)
+        },
         gpu_optimal_limit: gpu_optimal,
         ..Default::default()
     };

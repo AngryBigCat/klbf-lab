@@ -333,13 +333,8 @@ void raise(uint3 at : SV_DispatchThreadID) {
     found = all + 1.2 * float3(dot(sr.xyz, n), dot(sg.xyz, n), dot(sb.xyz, n)) / sum;
     found = clamp(found, 0.2 * all, 2.5 * all);
     found = lerp(found, cells[CELLS].rgb, 0.2) * level * open;
-    float3 was = unpack(light[p]);
-    // What the program left counts as far as it can be true: the sky's light
-    // outdoors, not the blocks of other memory.
-    float top = max(dot(found, LUMA) * most, 1e-6);
-    float has = dot(was, LUMA);
-    was *= min(1.0, top / max(has, 1e-6));
-    light[p] = pack(max(was, found));
+    // Willy/Neptune-VE leftover=off: do not blend with uninitialized resolve memory (fixes magenta/purple skin).
+    light[p] = pack(found);
 }
 #endif
 "#;
