@@ -53,6 +53,8 @@ const SET: &[(&str, &str)] = &[
     ("VICTORY_TABLE_MEMO", "1"),
     ("VICTORY_LIST_ALIAS_EXACT", "1"),
     ("VICTORY_LIST_HOLD", "1"),
+    // Windows in the card's memory through the bus (GPU upload heaps; bench E 27/11: 0.8 GB less RAM)
+    ("VICTORY_WINDOWS_BAR_MB", "1024"),
     // Picture
     ("VICTORY_BAKE_TEXTURES_MS", "10000"),
     ("VICTORY_PLANE_NOW", "1"),

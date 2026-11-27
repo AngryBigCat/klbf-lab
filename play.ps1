@@ -105,6 +105,11 @@ $set = [ordered]@{
     # source's writes within a list (a stale read in the base)
     VICTORY_TABLE_MEMO = '1'; VICTORY_LIST_ALIAS_EXACT = '1'; VICTORY_LIST_HOLD = '1'
 
+    # (KLBF Lab, bench E 27/11) Up to 1 GB of windows in the card's memory written by the CPU through the bus
+    # (D3D12 GPU upload heaps: Agility SDK + Resizable BAR/SAM; off by itself where the card has none):
+    # 0.8 GB less RAM at the same fps
+    VICTORY_WINDOWS_BAR_MB = '1024'
+
     # Picture: the title's character bake waits up to 10 s for its textures (1.5 s by default), and a draw
     # waits up to 500 ms for a pipeline still being made (above) instead of being dropped after 20 ms
     VICTORY_BAKE_TEXTURES_MS = '10000'
