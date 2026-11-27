@@ -11,6 +11,7 @@
 #              and is slow; faces can be missing in that first run and are right from the second.
 # -Data        saves (default: %LOCALAPPDATA%\klbf-lab\data)
 # -RayTracing  the title's own ray tracing (VICTORY_BVH_BUILDER=1): better light, much slower. Off by default.
+# -Fsr        Series S mode with AMD FSR 4 (the title's own upscaler, sent to the PC's FSR DLL in -FfxDir).
 # -AutoStart   presses through the start screens by itself, for a fresh start with no save
 # -SkipMovies  skips the opening movies (off by default): all or open (none opens), end (each jumps to its
 #              last frame), fast (decoded without waiting). VICTORY_SKIP_MOVIES, by zocram4cc.
@@ -37,6 +38,8 @@ param(
     [string]$Cache = '',
     [string]$Data = '',
     [switch]$RayTracing,
+    [switch]$Fsr,
+    [string]$FfxDir = 'D:\KLBF-Lab\ffx-2.4\Kits\FidelityFX\signedbin',
     [switch]$AutoStart,
     [ValidateSet('open', 'end', 'fast', 'all')][string]$SkipMovies = '',
     [switch]$NoProbeRays,
@@ -144,5 +147,14 @@ if ($OnlyPrecompile) { exit 0 }
 Write-Host ("KLBF Lab, Series X mode, {0} build, ray tracing {1}, memory hooks {2}" -f $Build, $(if ($RayTracing) { 'on' } else { 'off' }), $(if ($Hooks -and -not $NoHooks) { 'on' } else { 'off' }))
 Write-Host "Cache: $Cache"
 Write-Host "Saves: $Data"
-& $Victory run $exe --execute
+# -Fsr (KLBF Lab): Series S mode, whose title upscales with FSR 4, the calls going to the PC's FSR DLL
+# (VICTORY_FSR_DLL, in -FfxDir).
+if ($Fsr) {
+    $fsrDll = Join-Path $FfxDir 'amd_fidelityfx_upscaler_dx12.dll'
+    if (-not (Test-Path -LiteralPath $fsrDll)) { throw "AMD FSR not found: $fsrDll (use -FfxDir)" }
+    $env:VICTORY_FSR_DLL = $fsrDll
+    & $Victory run $exe --execute --console series-s
+} else {
+    & $Victory run $exe --execute
+}
 exit $LASTEXITCODE
